@@ -1,10 +1,11 @@
 """Virtual Portfolio Builder: Streamlit UI.
 
-Current scope (V1, step 1): input tickers/names -> resolve & confirm -> fetch raw data -> display.
-No returns, risk, covariance or optimization yet.
+Current scope (V1, steps 1-2): input tickers/names -> resolve & confirm -> fetch raw data ->
+returns, risk, covariance and correlation. No optimization yet.
 """
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 from data import (
@@ -17,6 +18,7 @@ from data import (
     fetch_ticker_data,
     resolve,
 )
+from stats import compute_stats
 
 MIN_TICKERS = 10  # Section 2.1
 
@@ -90,7 +92,7 @@ def render_ticker(td: TickerData, auto_picked: bool = False) -> None:
 
 
 st.title("Virtual Portfolio Builder")
-st.caption("V1 · Data pipeline check: raw prices, last price and dividend yield only.")
+st.caption("V1 · Data, returns, risk and covariance. No optimization yet.")
 
 # ---- Step 1: input --------------------------------------------------------------
 st.subheader("1. Enter stocks")
@@ -322,3 +324,115 @@ if ok:
     st.markdown("**Raw data per stock**")
     for r in ok:
         render_ticker(r, auto_picked=match_of[r.yahoo_symbol] == MATCH_AUTO)
+
+# ---- Step 4: returns, risk, covariance --------------------------------------------
+if not ok:
+    st.stop()
+
+st.subheader("4. Returns & risk")
+res = compute_stats(ok)
+by_symbol = {r.yahoo_symbol: r for r in ok}
+
+st.caption(
+    "Daily simple returns on **Close** (price only, excluding dividends). Dates are aligned "
+    "across exchanges; on a day an exchange was closed, its stocks carry their last close. "
+    "Each stock uses all the history it has (up to 5 years). Annualized using "
+    f"**{res.periods_per_year:.0f}** aligned trading days per year."
+)
+
+currencies = sorted({r.currency or "?" for r in ok})
+if len(currencies) > 1:
+    st.warning(
+        f"⚠️ **Mixed currencies ({', '.join(currencies)}).** Each stock's return and risk are "
+        "in its own currency, with no conversion. Comparisons across exchanges are biased: "
+        "returns in weaker or higher-inflation currencies look higher, and currency risk is "
+        "not included. Known limitation (see CLAUDE.md)."
+    )
+if len({r.exchange for r in ok}) > 1:
+    st.caption(
+        "Note: with daily returns, correlations between stocks on *different* exchanges are "
+        "understated, because the exchanges close at different times of day."
+    )
+if res.dropped_in_progress:
+    st.caption(
+        f"Market still open for {', '.join(res.dropped_in_progress)}: today's price isn't "
+        "final, so the previous close is used."
+    )
+
+summary_rows = []
+for symbol, s in res.stocks.items():
+    td = by_symbol[symbol]
+    summary_rows.append(
+        {
+            "Ticker": symbol,
+            "Company": td.company_name,
+            "Exchange": td.exchange,
+            "Currency": td.currency,
+            "Match": match_of[symbol],
+            "Ann. return (μ)": s.mu * 100,
+            "Ann. risk (σ)": s.sigma * 100,
+            "Price CAGR": s.cagr * 100,
+            "TTM dividend yield": (
+                td.ttm_dividend_yield * 100 if td.ttm_dividend_yield is not None else None
+            ),
+            "History (yrs)": s.years,
+            "From": f"{s.start:%Y-%m-%d}",
+            "To": f"{s.end:%Y-%m-%d}",
+            "Flags": f"⚠️ {len(s.flags)}" if s.flags else "",
+        }
+    )
+pct = st.column_config.NumberColumn(format="%.1f%%")
+st.dataframe(
+    pd.DataFrame(summary_rows),
+    width="stretch",
+    hide_index=True,
+    column_config={
+        "Ann. return (μ)": pct,
+        "Ann. risk (σ)": pct,
+        "Price CAGR": st.column_config.NumberColumn(
+            format="%.1f%%",
+            help="Compound annual growth of the price, for comparison with μ. "
+            "μ (average daily return × days/yr) is normally a little higher.",
+        ),
+        "TTM dividend yield": st.column_config.NumberColumn(format="%.2f%%"),
+        "History (yrs)": st.column_config.NumberColumn(format="%.1f"),
+    },
+)
+
+st.markdown("**Sanity checks**")
+for c in res.checks:
+    st.markdown(f"{'✅' if c.passed else '❌'} {c.name} · _{c.detail}_")
+failed_checks = [c for c in res.checks if not c.passed]
+if failed_checks:
+    st.error(f"{len(failed_checks)} sanity check(s) failed. Look at these before relying on the numbers.")
+
+flagged = [s for s in res.stocks.values() if s.flags]
+if flagged or res.high_corr_pairs:
+    st.markdown("**Flagged for you to look at** (still included)")
+    for s in flagged:
+        st.warning(f"**{s.symbol}** ({by_symbol[s.symbol].company_name}): " + " ".join(s.flags))
+    for a, b, x in res.high_corr_pairs:
+        st.warning(
+            f"**{a}** and **{b}** have correlation {x:.3f}: they move almost identically "
+            "(e.g. two share classes of one company)."
+        )
+else:
+    st.success("No stocks flagged: all returns, risks and histories are within normal ranges.")
+
+st.markdown("**Covariance matrix (annualized)**")
+st.dataframe(res.cov.style.format("{:.4f}"), width="stretch")
+
+st.markdown("**Correlation matrix**")
+n = len(res.corr)
+fig = px.imshow(
+    res.corr,
+    text_auto=".2f",
+    zmin=-1,
+    zmax=1,
+    color_continuous_scale="RdBu",
+    aspect="auto",
+)
+fig.update_layout(height=max(300, 45 * n + 120), margin=dict(l=0, r=0, t=10, b=0))
+st.plotly_chart(fig, width="stretch")
+with st.expander("Correlation matrix as a table"):
+    st.dataframe(res.corr.style.format("{:.3f}"), width="stretch")

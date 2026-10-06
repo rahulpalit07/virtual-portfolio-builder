@@ -2,7 +2,8 @@ streamlit
 yfinance
 numpy
 pandas
+plotly
+jinja2
 scipy
 PyPortfolioOpt
 riskparityportfolio
-plotly

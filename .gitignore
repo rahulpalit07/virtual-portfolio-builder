@@ -1,5 +1,25 @@
+# Virtual environments
 .venv/
+venv/
+env/
+
+# Python caches
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Secrets / local config
+.env
+.env.*
 .streamlit/secrets.toml
+
+# Temp, logs, OS files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Local Claude Code tooling
 .claude/
