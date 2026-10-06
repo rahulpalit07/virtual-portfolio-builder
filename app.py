@@ -1,9 +1,12 @@
 """Virtual Portfolio Builder: Streamlit UI.
 
-Current scope (V1, steps 1-2): input tickers/names -> resolve & confirm -> fetch raw data ->
-returns, risk, covariance and correlation. No optimization yet.
+Current scope (V1, steps 1-3): input tickers/names -> resolve & confirm -> fetch raw data ->
+returns, risk, covariance and correlation -> Min Risk portfolio.
 """
 
+from dataclasses import replace
+
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -18,6 +21,7 @@ from data import (
     fetch_ticker_data,
     resolve,
 )
+from optimizer import Constraints, min_risk_portfolio, portfolio_stats, prepare_covariance
 from stats import compute_stats
 
 MIN_TICKERS = 10  # Section 2.1
@@ -92,7 +96,7 @@ def render_ticker(td: TickerData, auto_picked: bool = False) -> None:
 
 
 st.title("Virtual Portfolio Builder")
-st.caption("V1 · Data, returns, risk and covariance. No optimization yet.")
+st.caption("V1 · Data, returns, risk, covariance and the Min Risk portfolio.")
 
 # ---- Step 1: input --------------------------------------------------------------
 st.subheader("1. Enter stocks")
@@ -436,3 +440,127 @@ fig.update_layout(height=max(300, 45 * n + 120), margin=dict(l=0, r=0, t=10, b=0
 st.plotly_chart(fig, width="stretch")
 with st.expander("Correlation matrix as a table"):
     st.dataframe(res.corr.style.format("{:.3f}"), width="stretch")
+
+# ---- Step 5: Min Risk portfolio --------------------------------------------------
+st.subheader("5. Min Risk portfolio")
+defaults = Constraints()
+st.caption(
+    "Minimizes portfolio risk (wᵀΣw) using the covariance matrix from section 4. Rules: "
+    f"weights sum to 100%, no short-selling, each stock either 0% or between "
+    f"{defaults.min_weight:.1%} and {defaults.max_weight:.0%}."
+)
+
+tickers = list(res.cov.index)
+floor_count = defaults.stocks_needed_for_cap
+min_stocks = st.number_input(
+    "Minimum number of stocks held",
+    min_value=floor_count,
+    max_value=max(floor_count, min(len(tickers), defaults.max_stocks_for_floor)),
+    value=max(floor_count, min(defaults.min_stocks, len(tickers))),
+    step=1,
+    help=f"With a {defaults.max_weight:.0%} cap, at least {floor_count} stocks are always "
+    "needed to reach 100%, so the minimum can't go lower than that.",
+)
+constraints = replace(defaults, min_stocks=int(min_stocks))
+
+# Shared by every portfolio: repaired once, used for both optimizing and the displayed figures
+prepared = prepare_covariance(res.cov)
+if prepared.note:
+    st.info(prepared.note)
+cov = prepared.cov
+
+mr = min_risk_portfolio(cov, tickers, constraints)
+
+if mr.weights is None:
+    st.error(f"Couldn't build the Min Risk portfolio. {mr.error}")
+    st.stop()
+
+for note in mr.notes:
+    st.info(note)
+if mr.error:
+    st.error(f"{mr.error} The portfolio below should not be relied on.")
+
+held = mr.held
+mu = pd.Series({s: v.mu for s, v in res.stocks.items()})
+yields = pd.Series({s: by_symbol[s].ttm_dividend_yield for s in tickers}, dtype=float)
+pstats = portfolio_stats(mr.weights, mu, cov, yields)
+
+left, right = st.columns([1, 1.2])
+with left:
+    st.markdown(f"**Portfolio ({len(held)} of {len(tickers)} stocks held)**")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Ticker": s,
+                    "Weight": w * 100,
+                    "Company": by_symbol[s].company_name,
+                    "Exchange": by_symbol[s].exchange,
+                    "Match": match_of[s],
+                }
+                for s, w in held.items()
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+        column_config={"Weight": st.column_config.NumberColumn(format="%.2f%%")},
+    )
+    excluded = [s for s in tickers if s not in held.index]
+    if excluded:
+        st.caption("Not held (0%): " + ", ".join(excluded))
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Expected return", f"{pstats['expected_return']:.2%}",
+              help="Weighted sum of each stock's annualized return (μ).")
+    m2.metric("Risk (σ)", f"{pstats['risk']:.2%}", help="√(wᵀΣw), annualized.")
+    m3.metric("Dividend yield", f"{pstats['dividend_yield']:.2%}",
+              help="Weighted TTM dividend yield.")
+    m4, m5, m6 = st.columns(3)
+    m4.metric("Equal-weight risk", f"{mr.equal_weight_risk:.2%}",
+              help=f"An equal share in all {len(tickers)} stocks, for comparison.")
+    m5.metric("Risk reduction", f"{mr.equal_weight_risk - pstats['risk']:.2%}",
+              help="Equal-weight risk minus optimized risk.")
+    m6.metric("Theoretical floor", f"{mr.lower_bound_risk:.2%}",
+              help=f"Lowest possible risk if the {constraints.min_weight:.1%} minimum and the "
+              "minimum-stock rules didn't exist. The true best portfolio under all the rules "
+              "lies between this and the optimized risk; a small gap means the result is "
+              "essentially optimal.")
+
+    if any(np.isnan(v) for v in yields[held.index]):
+        st.caption("Stocks with no dividend data are counted as 0% in the portfolio yield.")
+    if any(match_of[s] == MATCH_AUTO for s in held.index):
+        st.caption(f"{MATCH_AUTO}: check these holdings are the companies you meant.")
+    if len(currencies) > 1:
+        st.caption(
+            "⚠️ Mixed currencies: the expected return combines returns in "
+            f"{', '.join(currencies)} without conversion."
+        )
+
+with right:
+    st.markdown("**Correlation matrix** (held stocks first, by weight)")
+    order = list(held.index) + excluded
+    corr_sorted = res.corr.loc[order, order]
+    fig = px.imshow(
+        corr_sorted,
+        text_auto=".2f",
+        zmin=-1,
+        zmax=1,
+        color_continuous_scale="RdBu",
+        aspect="auto",
+    )
+    fig.update_layout(height=max(300, 40 * len(order) + 120), margin=dict(l=0, r=0, t=10, b=0))
+    st.plotly_chart(fig, width="stretch", key="corr_min_risk")
+    st.caption(
+        "Min Risk favours stocks with low risk and low correlation to the others "
+        "(paler cells), since those lower the portfolio's overall risk."
+    )
+
+st.markdown("**Verification checks**")
+for c in mr.checks:
+    icon = "✅" if c.passed else "❌"
+    if not c.applicable:
+        icon = "➖"
+    st.markdown(f"{icon} {c.name} · _{c.detail}_")
+failed_checks = [c for c in mr.checks if c.applicable and not c.passed]
+if failed_checks:
+    st.error(f"{len(failed_checks)} check(s) failed. Don't rely on this portfolio.")
