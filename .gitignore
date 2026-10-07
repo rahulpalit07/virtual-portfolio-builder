@@ -23,3 +23,7 @@ Thumbs.db
 
 # Local Claude Code tooling
 .claude/
+
+# Regression data (local only; scripts in tests/regression are committed)
+tests/regression/*.pkl
+tests/regression/*.json
