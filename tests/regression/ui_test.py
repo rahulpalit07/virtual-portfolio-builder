@@ -21,7 +21,8 @@ print("   sidebar elements before market:", len(at.sidebar.children) if hasattr(
 btn(at, "USA").click().run()
 print("2) after USA example: market =", at.session_state["market"], "| radio =", at.radio[0].value,
       "| fetched:", "fetched" in at.session_state, "| headers:", [h.value for h in at.header])
-print("   matches expander:", [(e.label, e.proto.expanded) for e in at.expander][:1])
+print("   section 1 (collapsed after results):", [(e.label, e.proto.expanded) for e in at.expander if e.label.startswith("**1. Your stocks**")])
+print("   matches expander:", [(e.label, e.proto.expanded) for e in at.expander if "matched" in e.label or "found" in e.label])
 print("   summary:", [t for t in texts(at) if t.startswith("**11 stocks")])
 print("   sidebar number inputs:", [n.label for n in at.sidebar.number_input])
 print("   comparison columns:", list(at.dataframe[0].value.columns))
@@ -54,7 +55,7 @@ amb = copy.deepcopy(rs[0]); amb.query = "Apple?"; amb.status = MULTIPLE
 amb.candidates = amb.candidates + [Candidate("APLE", "Apple Hospitality REIT", "NYSE", "NYQ")]
 nom = Resolution(query="xyzqwerty", exchange="USA")
 at.session_state["resolutions"] = rs + [amb, nom]; at.run()
-print("5) matches expander:", [(e.label, e.proto.expanded) for e in at.expander][:1])
+print("5) matches expander:", [(e.label, e.proto.expanded) for e in at.expander if "matched" in e.label or "found" in e.label])
 print("   auto-pick warning:", [w.value[:90] for w in at.warning if "auto-picked" in w.value])
 print("   build button:", [b.label for b in at.button if b.label.startswith("Build")], "| exceptions", exc(at))
 

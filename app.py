@@ -6,6 +6,7 @@ build) -> 2. Your portfolios (comparison + one portfolio at a time) -> Under the
 (data, returns & risk, matrices, sanity checks) -> Methodology & limitations -> footer.
 """
 
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
@@ -236,9 +237,14 @@ def input_key() -> str:
     return f"input_{ss.input_version}"
 
 
+def parse_stocks(text: str | None) -> list[str]:
+    """Split pasted input on commas, semicolons, tabs and new lines (not spaces: company names
+    such as "Commonwealth Bank" contain them); trim, drop blanks, keep the order entered."""
+    return [p.strip() for p in re.split(r"[,;\t\r\n]+", text or "") if p.strip()]
+
+
 def has_progress() -> bool:
-    edits = ss.get(input_key()) or {}
-    typed = any(edits.get(k) for k in ("added_rows", "edited_rows"))
+    typed = bool(parse_stocks(ss.get(input_key())))
     return typed or bool(ss.get("input_seed")) or any(k in ss for k in PROGRESS_KEYS)
 
 
@@ -271,259 +277,307 @@ def request_example(market_name: str) -> None:
         load_example(market_name)
 
 
-st.header("1. Your stocks")
-market_choice = st.radio(
-    "Choose the market for this session. All stocks must come from this market.",
-    EXCHANGES,
-    index=EXCHANGES.index(ss.market) if ss.market else None,
-    horizontal=True,
-    key=f"market_radio_{ss.market_version}",
-)
+# Section 1 collapses to one line once portfolios are built (user decision 2026-10-08), so the
+# results start near the top. It is a stateful expander: widgets inside a closed expander still
+# run, so the market, text box, picks and Include choices keep their state. It is forced open
+# whenever the user needs to act or see something there (ensure_section1_open).
+S1_KEY = "section1_open"
+if ss.pop("s1_open_next", False):
+    ss[S1_KEY] = True
+if ss.pop("s1_collapse_next", False):
+    ss[S1_KEY] = False
+section1_collapsible = bool(ss.get("fetched"))
 
-ex_cols = st.columns([1.3, 1, 1.15, 0.8, 3])
-ex_cols[0].markdown("No list handy? **Try an example:**")
-for col, m in zip(ex_cols[1:4], EXCHANGES):
-    col.button(m, key=f"example_{m}", on_click=request_example, args=(m,), width="stretch")
 
-if ss.get("pending_example"):
-    pending = ss.pending_example
-    st.warning(
-        f"Load the **{pending}** example? This clears everything in this session: the "
-        "stocks you entered and all results."
-    )
-    b1, b2, _ = st.columns([1.3, 1.3, 3])
-    b1.button(f"Load {pending} example and clear", type="primary", on_click=load_example, args=(pending,))
-    b2.button("Cancel", on_click=lambda: ss.pop("pending_example", None))
-    finish()
+class StopSection(Exception):
+    """Ends section 1 early; the page then finishes outside the section's container."""
 
-if market_choice is None:
-    st.info("Choose a market to start: India (NSE), Australia (ASX) or USA, or try an example.")
-    finish()
 
-if ss.market is None:
-    ss.market = market_choice
-elif market_choice != ss.market:
-    if has_progress():
-        st.warning(
-            f"Switch the market from **{ss.market}** to **{market_choice}**? This clears "
-            "everything in this session: the stocks you entered and all results."
+def ensure_section1_open() -> None:
+    """Open the collapsed section (takes effect on an immediate rerun)."""
+    if section1_collapsible and not ss.get(S1_KEY):
+        ss.s1_open_next = True
+        st.rerun()
+
+
+def section1_label() -> str:
+    _inc, skipped_before, results_before = ss.fetched
+    n_ok = sum(1 for r in results_before if r.ok)
+    label = f"**1. Your stocks** · {ss.market} · {n_ok} stock{'s' if n_ok != 1 else ''}"
+    if skipped_before:
+        label += f" · {len(skipped_before)} skipped"
+    if len(results_before) > n_ok:
+        label += " · " + flag(f"⚠️ {len(results_before) - n_ok} failed to fetch")
+    return label + ("" if ss.get(S1_KEY) else " · click to edit")
+
+
+if section1_collapsible:
+    ss[S1_KEY] = ss.get(S1_KEY, False)  # re-asserted every run, so a label change can't reset it
+    section1 = st.expander(section1_label(), key=S1_KEY, on_change="rerun")
+else:
+    st.header("1. Your stocks")
+    section1 = st.container()
+
+try:
+    with section1:
+        market_col, example_col = st.columns([1, 1.25], vertical_alignment="bottom")
+        market_choice = market_col.radio(
+            "Market for this session (all stocks must come from it)",
+            EXCHANGES,
+            index=EXCHANGES.index(ss.market) if ss.market else None,
+            horizontal=True,
+            key=f"market_radio_{ss.market_version}",
         )
-        b1, b2, _ = st.columns([1.3, 1.3, 3])
-        if b1.button(f"Switch to {market_choice} and clear", type="primary"):
-            clear_progress()
+        with example_col.container(horizontal=True, vertical_alignment="center", gap="small"):
+            st.markdown("No list handy? **Try an example:**", width="content")
+            for m in EXCHANGES:
+                st.button(m, key=f"example_{m}", on_click=request_example, args=(m,), width="content")
+
+        if ss.get("pending_example"):
+            pending = ss.pending_example
+            st.warning(
+                f"Load the **{pending}** example? This clears everything in this session: the "
+                "stocks you entered and all results."
+            )
+            b1, b2, _ = st.columns([1.3, 1.3, 3])
+            b1.button(f"Load {pending} example and clear", type="primary", on_click=load_example, args=(pending,))
+            b2.button("Cancel", on_click=lambda: ss.pop("pending_example", None))
+            ensure_section1_open()
+            raise StopSection
+
+        if market_choice is None:
+            st.info("Choose a market to start: India (NSE), Australia (ASX) or USA, or try an example.")
+            raise StopSection
+
+        if ss.market is None:
             ss.market = market_choice
-            ss.market_version += 1
-            st.rerun()
-        if b2.button(f"Cancel, stay on {ss.market}"):
-            ss.market_version += 1
-            st.rerun()
-        finish()
-    ss.market = market_choice
+        elif market_choice != ss.market:
+            if has_progress():
+                st.warning(
+                    f"Switch the market from **{ss.market}** to **{market_choice}**? This clears "
+                    "everything in this session: the stocks you entered and all results."
+                )
+                b1, b2, _ = st.columns([1.3, 1.3, 3])
+                if b1.button(f"Switch to {market_choice} and clear", type="primary"):
+                    clear_progress()
+                    ss.market = market_choice
+                    ss.market_version += 1
+                    st.rerun()
+                if b2.button(f"Cancel, stay on {ss.market}"):
+                    ss.market_version += 1
+                    st.rerun()
+                ensure_section1_open()
+                raise StopSection
+            ss.market = market_choice
 
-market = ss.market
+        market = ss.market
 
-# Sidebar (shown once a market is chosen); settings appear after portfolios are built
-st.sidebar.header("Settings")
-if not ss.get("fetched"):
-    st.sidebar.caption("Settings appear here once your portfolios are built.")
+        # Sidebar (shown once a market is chosen); settings appear after portfolios are built
+        st.sidebar.header("Settings")
+        if not ss.get("fetched"):
+            st.sidebar.caption("Settings appear here once your portfolios are built.")
 
-# ---- Input --------------------------------------------------------------------------------
-ticker_eg, name_eg = MARKET_EXAMPLES[market]
-seed = ss.get("input_seed") or []
-with st.form("tickers"):
-    st.markdown(
-        f"Enter at least {MIN_TICKERS} **{market}** stocks, by ticker (e.g. `{ticker_eg}`) or "
-        f"company name (e.g. `{name_eg}`). Add rows with the **+** at the bottom of the "
-        "table; select rows to delete them."
-    )
-    edited = st.data_editor(
-        pd.DataFrame({"Ticker or company name": pd.Series(seed, dtype="str")}),
-        num_rows="dynamic",
-        width="stretch",
-        hide_index=True,
-        key=input_key(),
-        column_config={"Ticker or company name": st.column_config.TextColumn(required=True)},
-    )
-    resolve_clicked = st.form_submit_button("Find stocks", type="primary")
+        # ---- Input --------------------------------------------------------------------------------
+        ticker_eg, name_eg = MARKET_EXAMPLES[market]
+        seed = ss.get("input_seed") or []
+        with st.form("tickers", border=False):
+            box_col, side_col = st.columns([3, 2])
+            box_col.text_area(
+                "Your stocks",
+                value=", ".join(seed),
+                height=120,
+                key=input_key(),
+                placeholder=f"e.g. {ticker_eg}, {name_eg}, …",
+                label_visibility="collapsed",
+            )
+            side_col.markdown(
+                f"Enter at least {MIN_TICKERS} **{market}** stocks, by ticker (e.g. `{ticker_eg}`) "
+                f"or company name (e.g. `{name_eg}`), separated by commas or new lines."
+            )
+            resolve_clicked = side_col.form_submit_button("Find stocks", type="primary")
 
-auto_run = ss.pop("auto_run", False)
-if resolve_clicked or auto_run:
-    queries = seed if auto_run else list(
-        dict.fromkeys(  # drop exact duplicates, keep order
-            str(q).strip() for q in edited["Ticker or company name"].dropna() if str(q).strip()
+        auto_run = ss.pop("auto_run", False)
+        if resolve_clicked or auto_run:
+            # Exact repeats are dropped here (as before); other duplicates are handled in the matches
+            queries = seed if auto_run else list(dict.fromkeys(parse_stocks(ss.get(input_key()))))
+            if not queries:
+                st.error("Please enter at least one ticker or company name.")
+                raise StopSection
+
+            with st.spinner(f"Looking up {len(queries)} stocks on {market}…"):
+                ss.resolutions, ss.listing_currencies = cached_resolve_all(tuple(queries), market)
+            ss.pop("fetched", None)
+            ss.auto_build = auto_run
+
+        resolutions: list[Resolution] = ss.get("resolutions", [])
+        if not resolutions:
+            raise StopSection
+
+
+        def currency_of(symbol: str) -> str | None:
+            known = ss.get("listing_currencies") or {}
+            return known[symbol] if symbol in known else cached_currency(symbol)
+
+
+        # ---- Confirm matches (collapsed unless something needs attention) ----------------------------
+        def needs_attention() -> list[str]:
+            """Rows to look at before building: unmatched, auto-picked, switched, flagged, duplicates."""
+            notes, seen = [], set()
+            for i, r in enumerate(resolutions):
+                if r.status == NO_MATCH:
+                    notes.append(r.query)
+                    continue
+                pick = min(ss.get(f"pick_{i}_{r.query}", 0), len(r.candidates) - 1)
+                chosen = r.candidates[pick]
+                if (
+                    (r.status == MULTIPLE and pick == 0)
+                    or r.switched
+                    or out_of_market_reasons(chosen, market, currency_of(chosen.symbol))
+                    or chosen.symbol in seen
+                ):
+                    notes.append(r.query)
+                seen.add(chosen.symbol)
+            return notes
+
+
+        attention = needs_attention()
+        if attention:
+            ensure_section1_open()
+        n_found = sum(1 for r in resolutions if r.status != NO_MATCH)
+        matches_label = (
+            flag(f"⚠️ {n_found} of {len(resolutions)} found · {len(attention)} need your attention")
+            if attention
+            else f"✅ {n_found} stocks matched"
         )
-    )
-    if not queries:
-        st.error("Please enter at least one ticker or company name.")
-        finish()
 
-    with st.spinner(f"Looking up {len(queries)} stocks on {market}…"):
-        ss.resolutions, ss.listing_currencies = cached_resolve_all(tuple(queries), market)
-    ss.pop("fetched", None)
-    ss.auto_build = auto_run
+        # included: (symbol, listing market, input, company name, match type)
+        included: list[tuple[str, str, str, str, str]] = []
+        skipped: list[tuple[str, str]] = []  # (input, reason)
+        with st.expander(matches_label, expanded=bool(attention)):
+            st.caption(
+                f"Check that each input matched the company you meant on **{market}**. Where there "
+                "are several matches, pick the right one from the dropdown. Untick **Include** to skip "
+                "a stock. Stocks that don't look like they belong to this market are flagged and start "
+                "unticked; tick them to include them anyway. To fix an input instead, edit it in the "
+                "box above and click **Find stocks** again."
+            )
+            widths = [0.7, 2, 4, 3.4]
+            header = st.columns(widths)
+            for col, title in zip(header, ["Include", "Your input", "Matched stock", "Status"]):
+                col.markdown(f"**{title}**")
 
-resolutions: list[Resolution] = ss.get("resolutions", [])
-if not resolutions:
-    finish()
+            for i, r in enumerate(resolutions):
+                c0, c1, c3, c4 = st.columns(widths, vertical_alignment="center")
+                c1.write(f"“{r.query}”")
+                key = f"{i}_{r.query}"
 
+                if r.status == NO_MATCH:
+                    c0.checkbox("Include", value=False, disabled=True, key=f"inc_{key}",
+                                label_visibility="collapsed")
+                    c3.write(f"_{r.error or r.note or f'No stock found on {market}.'}_")
+                    c4.write(flag("⚠️ No match: will be skipped"))
+                    skipped.append((r.query, SKIP_NO_MATCH))
+                    continue
 
-def currency_of(symbol: str) -> str | None:
-    known = ss.get("listing_currencies") or {}
-    return known[symbol] if symbol in known else cached_currency(symbol)
+                pick = c3.selectbox(
+                    f"Match for {r.query}",
+                    options=range(len(r.candidates)),
+                    format_func=lambda j, r=r: r.candidates[j].label,
+                    key=f"pick_{key}",
+                    label_visibility="collapsed",
+                )
+                chosen = r.candidates[pick]
+                reasons = out_of_market_reasons(chosen, market, currency_of(chosen.symbol))
+                # Flagged listings start unticked (user decision); ticking one is the override
+                include = c0.checkbox("Include", value=not reasons, key=f"inc_{key}_{chosen.symbol}",
+                                      label_visibility="collapsed")
 
+                if reasons:
+                    match = MATCH_OUTSIDE
+                elif r.switched:
+                    match = MATCH_SWITCHED
+                elif pick != 0:
+                    match = MATCH_PICKED
+                elif r.status == EXACT:
+                    match = MATCH_EXACT
+                elif r.status == SINGLE:
+                    match = MATCH_SINGLE
+                else:
+                    match = MATCH_AUTO
 
-# ---- Confirm matches (collapsed unless something needs attention) ----------------------------
-def needs_attention() -> list[str]:
-    """Rows to look at before building: unmatched, auto-picked, switched, flagged, duplicates."""
-    notes, seen = [], set()
-    for i, r in enumerate(resolutions):
-        if r.status == NO_MATCH:
-            notes.append(r.query)
-            continue
-        pick = min(ss.get(f"pick_{i}_{r.query}", 0), len(r.candidates) - 1)
-        chosen = r.candidates[pick]
-        if (
-            (r.status == MULTIPLE and pick == 0)
-            or r.switched
-            or out_of_market_reasons(chosen, market, currency_of(chosen.symbol))
-            or chosen.symbol in seen
-        ):
-            notes.append(r.query)
-        seen.add(chosen.symbol)
-    return notes
+                if reasons:
+                    flag_text = f"⚠️ Outside {market}: " + "; ".join(reasons)
+                    if not include:
+                        c4.write(flag(f"{flag_text}. Not included; tick to include anyway."))
+                        skipped.append((r.query, f"Outside {market} ({'; '.join(reasons)})"))
+                        continue
+                    c4.write(flag(f"{flag_text}. **Included by you.**"))
+                elif not include:
+                    c4.write("⏭️ Skipped by you")
+                    skipped.append((r.query, SKIP_BY_USER))
+                    continue
 
+                # Several inputs resolving to the same stock: fetch it once, skip the later ones
+                first = next((e for e in included if e[0] == chosen.symbol), None)
+                if first is not None:
+                    reason = f"Duplicate of “{first[2]}” ({chosen.symbol})"
+                    c4.write(f"⏭️ {reason}: will be skipped")
+                    skipped.append((r.query, reason))
+                    continue
 
-attention = needs_attention()
-n_found = sum(1 for r in resolutions if r.status != NO_MATCH)
-matches_label = (
-    flag(f"⚠️ {n_found} of {len(resolutions)} found · {len(attention)} need your attention")
-    if attention
-    else f"✅ {n_found} stocks matched"
-)
+                if match == MATCH_SWITCHED:
+                    c4.write(flag(
+                        f"⚠️ You entered {r.entered.symbol} ({r.entered.exchange_display}); using the "
+                        f"{market} listing instead (its price and currency)."
+                    ))
+                elif match == MATCH_AUTO:
+                    c4.write(flag(f"⚠️ Auto-picked top of {len(r.candidates)} matches (not changed)"))
+                elif match != MATCH_OUTSIDE:
+                    c4.write(match)
+                listing_market = market_of_exchange(chosen.exchange_code) or market
+                included.append((chosen.symbol, listing_market, r.query, chosen.name, match))
 
-# included: (symbol, listing market, input, company name, match type)
-included: list[tuple[str, str, str, str, str]] = []
-skipped: list[tuple[str, str]] = []  # (input, reason)
-with st.expander(matches_label, expanded=bool(attention)):
-    st.caption(
-        f"Check that each input matched the company you meant on **{market}**. Where there "
-        "are several matches, pick the right one from the dropdown. Untick **Include** to skip "
-        "a stock. Stocks that don't look like they belong to this market are flagged and start "
-        "unticked; tick them to include them anyway. To fix a row instead, edit it in the "
-        "table above and click **Find stocks** again."
-    )
-    widths = [0.7, 2, 4, 3.4]
-    header = st.columns(widths)
-    for col, title in zip(header, ["Include", "Your input", "Matched stock", "Status"]):
-        col.markdown(f"**{title}**")
+        auto_picked = [e for e in included if e[4] == MATCH_AUTO]
+        if auto_picked:
+            st.warning(
+                f"⚠️ {len(auto_picked)} stock(s) were auto-picked from several possible matches: "
+                + ", ".join(f"“{e[2]}” → {e[0]} ({e[3]})" for e in auto_picked)
+                + ". Check them in the matches above."
+            )
+        if included and len(included) < MIN_TICKERS:
+            st.caption(
+                f"{len(included)} stock(s) included. The spec asks for at least {MIN_TICKERS}; "
+                "portfolios are still built."
+            )
+        if skipped:
+            st.caption(
+                f"**Will skip {len(skipped)}:** "
+                + "; ".join(f"“{q}”: {reason}" for q, reason in skipped)
+            )
+        if not included:
+            st.info("No stocks are included. Tick **Include** on at least one matched row to build.")
 
-    for i, r in enumerate(resolutions):
-        c0, c1, c3, c4 = st.columns(widths, vertical_alignment="center")
-        c1.write(f"“{r.query}”")
-        key = f"{i}_{r.query}"
+        build_label = f"Build portfolios ({len(included)} stock{'s' if len(included) != 1 else ''}"
+        build_label += f", skipping {len(skipped)})" if skipped else ")"
+        build_clicked = st.button(build_label, type="primary", disabled=not included)
+        if ss.pop("auto_build", False) and included:
+            build_clicked = True
 
-        if r.status == NO_MATCH:
-            c0.checkbox("Include", value=False, disabled=True, key=f"inc_{key}",
-                        label_visibility="collapsed")
-            c3.write(f"_{r.error or r.note or f'No stock found on {market}.'}_")
-            c4.write(flag("⚠️ No match: will be skipped"))
-            skipped.append((r.query, SKIP_NO_MATCH))
-            continue
+        if build_clicked:
+            with st.spinner(f"Fetching 5 years of prices for {len(included)} stocks…"):
+                results = cached_fetch_all(tuple((s, ex, q, n) for s, ex, q, n, _m in included))
+            ss.fetched = (included, skipped, results)
+            ss.s1_collapse_next = True  # results start near the top: collapse section 1
+            st.rerun()
 
-        pick = c3.selectbox(
-            f"Match for {r.query}",
-            options=range(len(r.candidates)),
-            format_func=lambda j, r=r: r.candidates[j].label,
-            key=f"pick_{key}",
-            label_visibility="collapsed",
-        )
-        chosen = r.candidates[pick]
-        reasons = out_of_market_reasons(chosen, market, currency_of(chosen.symbol))
-        # Flagged listings start unticked (user decision); ticking one is the override
-        include = c0.checkbox("Include", value=not reasons, key=f"inc_{key}_{chosen.symbol}",
-                              label_visibility="collapsed")
-
-        if reasons:
-            match = MATCH_OUTSIDE
-        elif r.switched:
-            match = MATCH_SWITCHED
-        elif pick != 0:
-            match = MATCH_PICKED
-        elif r.status == EXACT:
-            match = MATCH_EXACT
-        elif r.status == SINGLE:
-            match = MATCH_SINGLE
-        else:
-            match = MATCH_AUTO
-
-        if reasons:
-            flag_text = f"⚠️ Outside {market}: " + "; ".join(reasons)
-            if not include:
-                c4.write(flag(f"{flag_text}. Not included; tick to include anyway."))
-                skipped.append((r.query, f"Outside {market} ({'; '.join(reasons)})"))
-                continue
-            c4.write(flag(f"{flag_text}. **Included by you.**"))
-        elif not include:
-            c4.write("⏭️ Skipped by you")
-            skipped.append((r.query, SKIP_BY_USER))
-            continue
-
-        # Several inputs resolving to the same stock: fetch it once, skip the later ones
-        first = next((e for e in included if e[0] == chosen.symbol), None)
-        if first is not None:
-            reason = f"Duplicate of “{first[2]}” ({chosen.symbol})"
-            c4.write(f"⏭️ {reason}: will be skipped")
-            skipped.append((r.query, reason))
-            continue
-
-        if match == MATCH_SWITCHED:
-            c4.write(flag(
-                f"⚠️ You entered {r.entered.symbol} ({r.entered.exchange_display}); using the "
-                f"{market} listing instead (its price and currency)."
-            ))
-        elif match == MATCH_AUTO:
-            c4.write(flag(f"⚠️ Auto-picked top of {len(r.candidates)} matches (not changed)"))
-        elif match != MATCH_OUTSIDE:
-            c4.write(match)
-        listing_market = market_of_exchange(chosen.exchange_code) or market
-        included.append((chosen.symbol, listing_market, r.query, chosen.name, match))
-
-auto_picked = [e for e in included if e[4] == MATCH_AUTO]
-if auto_picked:
-    st.warning(
-        f"⚠️ {len(auto_picked)} stock(s) were auto-picked from several possible matches: "
-        + ", ".join(f"“{e[2]}” → {e[0]} ({e[3]})" for e in auto_picked)
-        + ". Check them in the matches above."
-    )
-if included and len(included) < MIN_TICKERS:
-    st.caption(
-        f"{len(included)} stock(s) included. The spec asks for at least {MIN_TICKERS}; "
-        "portfolios are still built."
-    )
-if skipped:
-    st.caption(
-        f"**Will skip {len(skipped)}:** "
-        + "; ".join(f"“{q}”: {reason}" for q, reason in skipped)
-    )
-if not included:
-    st.info("No stocks are included. Tick **Include** on at least one matched row to build.")
-
-build_label = f"Build portfolios ({len(included)} stock{'s' if len(included) != 1 else ''}"
-build_label += f", skipping {len(skipped)})" if skipped else ")"
-build_clicked = st.button(build_label, type="primary", disabled=not included)
-if ss.pop("auto_build", False) and included:
-    build_clicked = True
-
-if build_clicked:
-    with st.spinner(f"Fetching 5 years of prices for {len(included)} stocks…"):
-        results = cached_fetch_all(tuple((s, ex, q, n) for s, ex, q, n, _m in included))
-    ss.fetched = (included, skipped, results)
-
-fetched = ss.get("fetched")
-if not fetched:
-    finish()
-if fetched[0] != included or fetched[1] != skipped:
-    st.info("Your selections changed since the last build. Click **Build portfolios** to refresh.")
+        fetched = ss.get("fetched")
+        if not fetched:
+            raise StopSection
+        if fetched[0] != included or fetched[1] != skipped:
+            ensure_section1_open()
+            st.info("Your selections changed since the last build. Click **Build portfolios** to refresh.")
+            raise StopSection
+except StopSection:
     finish()
 
 _, skipped, results = fetched
@@ -543,7 +597,7 @@ if skipped:
     summary += f" · {len(skipped)} skipped"
 if failed:
     summary += " · " + flag(f"⚠️ {len(failed)} failed to fetch ({', '.join(r.yahoo_symbol for r in failed)})")
-st.caption(summary)
+section1.caption(summary)
 
 # ---- Settings (sidebar) ---------------------------------------------------------------------
 defaults = Constraints()
