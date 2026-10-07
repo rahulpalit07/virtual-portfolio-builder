@@ -155,6 +155,25 @@ def fit_height(rows: int) -> int:
     return 38 + 35 * max(rows, 1)
 
 
+# Colours (user decision 2026-10-08): accents light green (theme primary in
+# .streamlit/config.toml), red only for errors, flags yellow.
+GREEN = "#4CAF50"
+CHART_COLORS = {"Min Risk": "#1E88E5", "Max Return": "#8E24AA", "Max Sharpe": "#2E7D32"}
+CORR_SCALE = "PRGn"  # purple (−1) → white (0) → green (+1); no red, which means "error" here
+FLAG_CELL = "background-color: rgba(250, 202, 43, 0.28)"  # yellow, readable in light and dark
+
+
+def flag(text: str) -> str:
+    """Markdown for a flag: yellow text."""
+    return f":yellow[{text}]"
+
+
+def flag_cells(df: pd.DataFrame, columns: list[str]):
+    """Styler that shades flagged cells (text starting with ⚠️) yellow in `columns`."""
+    cols = [c for c in columns if c in df.columns]
+    return df.style.map(lambda v: FLAG_CELL if str(v).startswith("⚠️") else "", subset=cols)
+
+
 def render_methodology() -> None:
     c = Constraints()
     with st.expander("Methodology & limitations"):
@@ -377,7 +396,7 @@ def needs_attention() -> list[str]:
 attention = needs_attention()
 n_found = sum(1 for r in resolutions if r.status != NO_MATCH)
 matches_label = (
-    f"⚠️ {n_found} of {len(resolutions)} found · {len(attention)} need your attention"
+    flag(f"⚠️ {n_found} of {len(resolutions)} found · {len(attention)} need your attention")
     if attention
     else f"✅ {n_found} stocks matched"
 )
@@ -407,7 +426,7 @@ with st.expander(matches_label, expanded=bool(attention)):
             c0.checkbox("Include", value=False, disabled=True, key=f"inc_{key}",
                         label_visibility="collapsed")
             c3.write(f"_{r.error or r.note or f'No stock found on {market}.'}_")
-            c4.write("❌ No match: will be skipped")
+            c4.write(flag("⚠️ No match: will be skipped"))
             skipped.append((r.query, SKIP_NO_MATCH))
             continue
 
@@ -438,12 +457,12 @@ with st.expander(matches_label, expanded=bool(attention)):
             match = MATCH_AUTO
 
         if reasons:
-            flag = f"⚠️ Outside {market}: " + "; ".join(reasons)
+            flag_text = f"⚠️ Outside {market}: " + "; ".join(reasons)
             if not include:
-                c4.write(f"{flag}. Not included; tick to include anyway.")
+                c4.write(flag(f"{flag_text}. Not included; tick to include anyway."))
                 skipped.append((r.query, f"Outside {market} ({'; '.join(reasons)})"))
                 continue
-            c4.write(f"{flag}. **Included by you.**")
+            c4.write(flag(f"{flag_text}. **Included by you.**"))
         elif not include:
             c4.write("⏭️ Skipped by you")
             skipped.append((r.query, SKIP_BY_USER))
@@ -458,12 +477,12 @@ with st.expander(matches_label, expanded=bool(attention)):
             continue
 
         if match == MATCH_SWITCHED:
-            c4.write(
+            c4.write(flag(
                 f"⚠️ You entered {r.entered.symbol} ({r.entered.exchange_display}); using the "
                 f"{market} listing instead (its price and currency)."
-            )
+            ))
         elif match == MATCH_AUTO:
-            c4.write(f"⚠️ Auto-picked top of {len(r.candidates)} matches (not changed)")
+            c4.write(flag(f"⚠️ Auto-picked top of {len(r.candidates)} matches (not changed)"))
         elif match != MATCH_OUTSIDE:
             c4.write(match)
         listing_market = market_of_exchange(chosen.exchange_code) or market
@@ -523,7 +542,7 @@ summary = f"**{len(ok)} stocks** · up to 5 years of daily prices · to {latest:
 if skipped:
     summary += f" · {len(skipped)} skipped"
 if failed:
-    summary += f" · ⚠️ {len(failed)} failed to fetch ({', '.join(r.yahoo_symbol for r in failed)})"
+    summary += " · " + flag(f"⚠️ {len(failed)} failed to fetch ({', '.join(r.yahoo_symbol for r in failed)})")
 st.caption(summary)
 
 # ---- Settings (sidebar) ---------------------------------------------------------------------
@@ -647,7 +666,7 @@ for name, r in portfolios.items():
         "Dividend yield": s["dividend_yield"] * 100,
         "Sharpe ratio": s["sharpe"],
         "Stocks held": len(r.held),
-        "Status": "⚠️ failed a check" if r.error else "",
+        "Status": "❌ failed a check" if r.error else "",
     })
 s = stats_of(equal_weights(tickers))
 rows.append({
@@ -691,7 +710,7 @@ def render_holdings(r) -> tuple[pd.Series, list[str]]:
     held = r.held
     st.markdown(f"**{choice} portfolio ({len(held)} of {len(tickers)} stocks held)**")
     st.dataframe(
-        pd.DataFrame(
+        flag_cells(pd.DataFrame(
             [
                 {
                     "Ticker": s,
@@ -702,7 +721,7 @@ def render_holdings(r) -> tuple[pd.Series, list[str]]:
                 }
                 for s, w in held.items()
             ]
-        ),
+        ), ["Match"]),
         width="stretch",
         hide_index=True,
         height=fit_height(len(held)),
@@ -741,7 +760,7 @@ def render_notes(held: pd.Series) -> None:
         st.caption(f"{MATCH_AUTO}: check these holdings are the companies you meant.")
     outside = [s for s in held.index if match_of[s] == MATCH_OUTSIDE]
     if outside:
-        st.caption(f"⚠️ Holds stocks outside {market} that you chose to include: {', '.join(outside)}.")
+        st.caption(flag(f"⚠️ Holds stocks outside {market} that you chose to include: {', '.join(outside)}."))
 
 
 def render_checks(checks, proof: list[tuple[str, str, str]] = ()) -> None:
@@ -781,7 +800,7 @@ def render_dividend_flags() -> None:
             "exclude it: " + ", ".join(f"{s} ({y:.1%})" for s, y in flags.implausible)
         )
     if flags.high:
-        st.info(
+        st.warning(
             "High yield (8–15%), worth checking: "
             + ", ".join(f"{s} ({y:.1%})" for s, y in flags.high)
         )
@@ -797,7 +816,7 @@ def frontier_chart(fr, ms_result) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=fr.curve.risk * 100, y=fr.curve.expected_return * 100, mode="lines",
-        name="Efficient frontier", line=dict(width=3),
+        name="Efficient frontier", line=dict(width=3, color=GREEN),
         hovertemplate="Risk %{x:.2f}%<br>Return %{y:.2f}%<extra>Frontier</extra>",
     ))
     fig.add_trace(go.Scatter(
@@ -811,7 +830,8 @@ def frontier_chart(fr, ms_result) -> go.Figure:
             continue
         fig.add_trace(go.Scatter(
             x=row.risk * 100, y=row.expected_return * 100, mode="markers", name=label,
-            marker=dict(symbol=symbol, size=size, line=dict(width=1, color="black")),
+            marker=dict(symbol=symbol, size=size, color=CHART_COLORS[label],
+                        line=dict(width=1, color="black")),
             hovertemplate=f"{label}<br>Risk %{{x:.2f}}%<br>Return %{{y:.2f}}%<extra></extra>",
         ))
     fig.update_layout(
@@ -856,7 +876,7 @@ else:
                 text_auto=".2f",
                 zmin=-1,
                 zmax=1,
-                color_continuous_scale="RdBu",
+                color_continuous_scale=CORR_SCALE,
                 aspect="auto",
             )
             fig.update_layout(height=max(300, 40 * len(order) + 120), margin=dict(l=0, r=0, t=10, b=0))
@@ -900,8 +920,8 @@ else:
             f"Risk-free rate {risk_free_rate:.3%}: "
             + ("your override. " if rf_overridden else f"the {rf_info.name}"
                + (" (fallback value). " if rf_info.is_fallback else ". "))
-            + (f"⚠️ The included stocks are priced in {', '.join(currencies)}; this single "
-               f"{market} rate is applied to all of them. " if len(currencies) > 1 else "")
+            + (flag(f"⚠️ The included stocks are priced in {', '.join(currencies)}; this single "
+               f"{market} rate is applied to all of them.") + " " if len(currencies) > 1 else "")
             + "Expected returns are price-only (dividends excluded), which understates Sharpe "
             "ratios for dividend payers."
         )
@@ -963,7 +983,7 @@ with st.expander("Data, returns & risk, matrices and sanity checks", expanded=Fa
                 for r in ok
             ]
         )
-        st.dataframe(included_df, width="stretch", hide_index=True, height=fit_height(len(included_df)))
+        st.dataframe(flag_cells(included_df, ["Match"]), width="stretch", hide_index=True, height=fit_height(len(included_df)))
         if skipped:
             st.markdown(f"**⏭️ Skipped ({len(skipped)})**")
             st.dataframe(pd.DataFrame(skipped, columns=["Input", "Reason"]), width="stretch",
@@ -1045,7 +1065,7 @@ with st.expander("Data, returns & risk, matrices and sanity checks", expanded=Fa
             })
         pct = st.column_config.NumberColumn(format="%.1f%%")
         st.dataframe(
-            pd.DataFrame(summary_rows),
+            flag_cells(pd.DataFrame(summary_rows), ["Match", "Flags"]),
             width="stretch",
             hide_index=True,
             height=fit_height(len(summary_rows)),
@@ -1082,7 +1102,7 @@ with st.expander("Data, returns & risk, matrices and sanity checks", expanded=Fa
         st.markdown("**Correlation matrix**")
         n = len(res.corr)
         fig = px.imshow(res.corr, text_auto=".2f", zmin=-1, zmax=1,
-                        color_continuous_scale="RdBu", aspect="auto")
+                        color_continuous_scale=CORR_SCALE, aspect="auto")
         fig.update_layout(height=max(300, 45 * n + 120), margin=dict(l=0, r=0, t=10, b=0))
         st.plotly_chart(fig, width="stretch", key="corr_full")
         st.dataframe(res.corr.style.format("{:.3f}"), width="stretch", height=fit_height(n))

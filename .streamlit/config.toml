@@ -1,0 +1,6 @@
+# Presentation only (UI redesign). User decision 2026-10-08: buttons, radio buttons and every
+# other accent are light green; red is kept only for errors; flags are yellow.
+[theme]
+primaryColor = "#4CAF50"
+# Default chart colours without red (Streamlit's default palette starts blue, light blue, red…)
+chartCategoricalColors = ["#4CAF50", "#1E88E5", "#8E24AA", "#00897B", "#90A4AE", "#6D4C41", "#81C784"]
