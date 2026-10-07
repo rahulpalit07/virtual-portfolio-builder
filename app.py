@@ -1,7 +1,7 @@
 """Virtual Portfolio Builder: Streamlit UI.
 
-Current scope (V1, steps 1-3): input tickers/names -> resolve & confirm -> fetch raw data ->
-returns, risk, covariance and correlation -> Min Risk portfolio.
+Current scope (V1, steps 1-4): input tickers/names -> resolve & confirm -> fetch raw data ->
+returns, risk, covariance and correlation -> Min Risk, Max Return, Max Dividend, Max Sharpe.
 """
 
 from dataclasses import replace
@@ -9,6 +9,7 @@ from dataclasses import replace
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from data import (
@@ -21,7 +22,19 @@ from data import (
     fetch_ticker_data,
     resolve,
 )
-from optimizer import Constraints, min_risk_portfolio, portfolio_stats, prepare_covariance
+from frontier import efficient_frontier, frontier_check
+from optimizer import (
+    RISK_FREE_RATE,
+    Constraints,
+    dividend_data_flags,
+    equal_weights,
+    max_dividend_portfolio,
+    max_return_portfolio,
+    max_sharpe_portfolio,
+    min_risk_portfolio,
+    portfolio_stats,
+    prepare_covariance,
+)
 from stats import compute_stats
 
 MIN_TICKERS = 10  # Section 2.1
@@ -42,6 +55,33 @@ st.set_page_config(page_title="Virtual Portfolio Builder", layout="wide")
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_resolve(query: str, exchange: str) -> Resolution:
     return resolve(query, exchange)
+
+
+# Portfolio caches: keyed on exactly what each calculation depends on, so switching the
+# portfolio dropdown never re-optimizes, and changing an input recomputes only what uses it.
+@st.cache_data(show_spinner=False)
+def cached_min_risk(cov, tickers, constraints):
+    return min_risk_portfolio(cov, list(tickers), constraints)
+
+
+@st.cache_data(show_spinner=False)
+def cached_max_return(mu, constraints):
+    return max_return_portfolio(mu, constraints)
+
+
+@st.cache_data(show_spinner=False)
+def cached_max_dividend(yields, constraints):
+    return max_dividend_portfolio(yields, constraints)
+
+
+@st.cache_data(show_spinner=False)
+def cached_max_sharpe(cov, mu, risk_free_rate, constraints, compare):
+    return max_sharpe_portfolio(cov, mu, risk_free_rate, constraints, compare)
+
+
+@st.cache_data(show_spinner=False)
+def cached_frontier(cov, mu, constraints, anchors):
+    return efficient_frontier(cov, mu, constraints, anchors)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -96,7 +136,7 @@ def render_ticker(td: TickerData, auto_picked: bool = False) -> None:
 
 
 st.title("Virtual Portfolio Builder")
-st.caption("V1 · Data, returns, risk, covariance and the Min Risk portfolio.")
+st.caption("V1 · Data, returns, risk, covariance and four optimized portfolios.")
 
 # ---- Step 1: input --------------------------------------------------------------
 st.subheader("1. Enter stocks")
@@ -441,18 +481,19 @@ st.plotly_chart(fig, width="stretch")
 with st.expander("Correlation matrix as a table"):
     st.dataframe(res.corr.style.format("{:.3f}"), width="stretch")
 
-# ---- Step 5: Min Risk portfolio --------------------------------------------------
-st.subheader("5. Min Risk portfolio")
+# ---- Step 5: Portfolios (Min Risk, Max Return, Max Dividend, Max Sharpe) ---------------
+st.subheader("5. Portfolios")
 defaults = Constraints()
 st.caption(
-    "Minimizes portfolio risk (wᵀΣw) using the covariance matrix from section 4. Rules: "
-    f"weights sum to 100%, no short-selling, each stock either 0% or between "
+    "Four portfolios built from the stocks above, each a separate 100% allocation. Rules for "
+    f"all of them: weights sum to 100%, no short-selling, each stock either 0% or between "
     f"{defaults.min_weight:.1%} and {defaults.max_weight:.0%}."
 )
 
 tickers = list(res.cov.index)
 floor_count = defaults.stocks_needed_for_cap
-min_stocks = st.number_input(
+ctrl_left, ctrl_right = st.columns(2)
+min_stocks = ctrl_left.number_input(
     "Minimum number of stocks held",
     min_value=floor_count,
     max_value=max(floor_count, min(len(tickers), defaults.max_stocks_for_floor)),
@@ -461,6 +502,17 @@ min_stocks = st.number_input(
     help=f"With a {defaults.max_weight:.0%} cap, at least {floor_count} stocks are always "
     "needed to reach 100%, so the minimum can't go lower than that.",
 )
+rf_pct = ctrl_right.number_input(
+    "Risk-free rate for Max Sharpe (% per year)",
+    min_value=0.0,
+    max_value=50.0,
+    value=RISK_FREE_RATE * 100,
+    step=0.25,
+    format="%.2f",
+    help="Used for every Sharpe ratio shown. Default 4%: a placeholder roughly between "
+    "US, Australian and Indian short-term rates; set it to a current rate.",
+)
+risk_free_rate = rf_pct / 100
 constraints = replace(defaults, min_stocks=int(min_stocks))
 
 # Shared by every portfolio: repaired once, used for both optimizing and the displayed figures
@@ -469,25 +521,81 @@ if prepared.note:
     st.info(prepared.note)
 cov = prepared.cov
 
-mr = min_risk_portfolio(cov, tickers, constraints)
-
-if mr.weights is None:
-    st.error(f"Couldn't build the Min Risk portfolio. {mr.error}")
-    st.stop()
-
-for note in mr.notes:
-    st.info(note)
-if mr.error:
-    st.error(f"{mr.error} The portfolio below should not be relied on.")
-
-held = mr.held
-mu = pd.Series({s: v.mu for s, v in res.stocks.items()})
+mu = pd.Series({s: v.mu for s, v in res.stocks.items()})[tickers]
 yields = pd.Series({s: by_symbol[s].ttm_dividend_yield for s in tickers}, dtype=float)
-pstats = portfolio_stats(mr.weights, mu, cov, yields)
 
-left, right = st.columns([1, 1.2])
-with left:
-    st.markdown(f"**Portfolio ({len(held)} of {len(tickers)} stocks held)**")
+with st.spinner("Building portfolios…"):
+    mr = cached_min_risk(cov, tuple(tickers), constraints)
+    mx = cached_max_return(mu, constraints)
+    md = cached_max_dividend(yields, constraints)
+    compare = {name: r.weights for name, r in (("Min Risk", mr), ("Max Return", mx)) if r.ok}
+    ms = cached_max_sharpe(cov, mu, risk_free_rate, constraints, compare)
+    anchors = {name: r.weights for name, r in (("Min Risk", mr), ("Max Sharpe", ms), ("Max Return", mx)) if r.ok}
+    frontier = (
+        cached_frontier(cov, mu, constraints, anchors)
+        if "Min Risk" in anchors and "Max Return" in anchors
+        else None
+    )
+
+portfolios = {"Min Risk": mr, "Max Return": mx, "Max Dividend": md, "Max Sharpe": ms}
+
+
+def stats_of(weights: pd.Series) -> dict[str, float]:
+    return portfolio_stats(weights, mu, cov, yields, risk_free_rate)
+
+
+# Comparison of all four (plus equal weight as a reference)
+st.markdown("**Comparison**")
+rows = []
+for name, r in portfolios.items():
+    if r.weights is None:
+        rows.append({"Portfolio": name, "Stocks held": None, "Note": "Not available (see below)"})
+        continue
+    s = stats_of(r.weights)
+    rows.append({
+        "Portfolio": name,
+        "Expected return": s["expected_return"] * 100,
+        "Risk (σ)": s["risk"] * 100,
+        "Dividend yield": s["dividend_yield"] * 100,
+        "Sharpe ratio": s["sharpe"],
+        "Stocks held": len(r.held),
+        "Note": "⚠️ failed a check" if r.error else "",
+    })
+s = stats_of(equal_weights(tickers))
+rows.append({
+    "Portfolio": "Equal weight (reference)",
+    "Expected return": s["expected_return"] * 100,
+    "Risk (σ)": s["risk"] * 100,
+    "Dividend yield": s["dividend_yield"] * 100,
+    "Sharpe ratio": s["sharpe"],
+    "Stocks held": len(tickers),
+    "Note": "",
+})
+pct2 = st.column_config.NumberColumn(format="%.2f%%")
+st.dataframe(
+    pd.DataFrame(rows),
+    width="stretch",
+    hide_index=True,
+    column_config={
+        "Expected return": pct2,
+        "Risk (σ)": pct2,
+        "Dividend yield": pct2,
+        "Sharpe ratio": st.column_config.NumberColumn(format="%.3f"),
+    },
+)
+st.caption(
+    f"Sharpe ratio = (expected return − {risk_free_rate:.2%}) ÷ risk. "
+    + (f"Returns are in {', '.join(currencies)} without conversion. " if len(currencies) > 1 else "")
+    + "Expected returns are price-only (dividends excluded)."
+)
+
+choice = st.selectbox("Show portfolio", list(portfolios), index=0)
+result = portfolios[choice]
+
+
+def render_holdings(r) -> tuple[pd.Series, list[str]]:
+    held = r.held
+    st.markdown(f"**{choice} portfolio ({len(held)} of {len(tickers)} stocks held)**")
     st.dataframe(
         pd.DataFrame(
             [
@@ -508,24 +616,29 @@ with left:
     excluded = [s for s in tickers if s not in held.index]
     if excluded:
         st.caption("Not held (0%): " + ", ".join(excluded))
+    return held, excluded
 
-    m1, m2, m3 = st.columns(3)
+
+def metric_slots(count: int, per_row: int) -> list:
+    """`count` metric slots laid out `per_row` to a row (2 in the narrow side-panel views)."""
+    slots = []
+    while len(slots) < count:
+        slots.extend(st.columns(per_row))
+    return slots[:count]
+
+
+def render_main_stats(pstats: dict[str, float], per_row: int = 4) -> None:
+    m1, m2, m3, m4 = metric_slots(4, per_row)
     m1.metric("Expected return", f"{pstats['expected_return']:.2%}",
               help="Weighted sum of each stock's annualized return (μ).")
     m2.metric("Risk (σ)", f"{pstats['risk']:.2%}", help="√(wᵀΣw), annualized.")
     m3.metric("Dividend yield", f"{pstats['dividend_yield']:.2%}",
               help="Weighted TTM dividend yield.")
-    m4, m5, m6 = st.columns(3)
-    m4.metric("Equal-weight risk", f"{mr.equal_weight_risk:.2%}",
-              help=f"An equal share in all {len(tickers)} stocks, for comparison.")
-    m5.metric("Risk reduction", f"{mr.equal_weight_risk - pstats['risk']:.2%}",
-              help="Equal-weight risk minus optimized risk.")
-    m6.metric("Theoretical floor", f"{mr.lower_bound_risk:.2%}",
-              help=f"Lowest possible risk if the {constraints.min_weight:.1%} minimum and the "
-              "minimum-stock rules didn't exist. The true best portfolio under all the rules "
-              "lies between this and the optimized risk; a small gap means the result is "
-              "essentially optimal.")
+    m4.metric("Sharpe ratio", f"{pstats['sharpe']:.3f}",
+              help=f"(Expected return − risk-free rate {risk_free_rate:.2%}) ÷ risk.")
 
+
+def render_notes(held: pd.Series) -> None:
     if any(np.isnan(v) for v in yields[held.index]):
         st.caption("Stocks with no dividend data are counted as 0% in the portfolio yield.")
     if any(match_of[s] == MATCH_AUTO for s in held.index):
@@ -536,31 +649,186 @@ with left:
             f"{', '.join(currencies)} without conversion."
         )
 
-with right:
-    st.markdown("**Correlation matrix** (held stocks first, by weight)")
-    order = list(held.index) + excluded
-    corr_sorted = res.corr.loc[order, order]
-    fig = px.imshow(
-        corr_sorted,
-        text_auto=".2f",
-        zmin=-1,
-        zmax=1,
-        color_continuous_scale="RdBu",
-        aspect="auto",
-    )
-    fig.update_layout(height=max(300, 40 * len(order) + 120), margin=dict(l=0, r=0, t=10, b=0))
-    st.plotly_chart(fig, width="stretch", key="corr_min_risk")
-    st.caption(
-        "Min Risk favours stocks with low risk and low correlation to the others "
-        "(paler cells), since those lower the portfolio's overall risk."
-    )
 
-st.markdown("**Verification checks**")
-for c in mr.checks:
-    icon = "✅" if c.passed else "❌"
-    if not c.applicable:
-        icon = "➖"
-    st.markdown(f"{icon} {c.name} · _{c.detail}_")
-failed_checks = [c for c in mr.checks if c.applicable and not c.passed]
-if failed_checks:
-    st.error(f"{len(failed_checks)} check(s) failed. Don't rely on this portfolio.")
+def render_checks(checks) -> None:
+    st.markdown("**Verification checks**")
+    for c in checks:
+        icon = "✅" if c.passed else "❌"
+        if not c.applicable:
+            icon = "➖"
+        st.markdown(f"{icon} {c.name} · _{c.detail}_")
+    failed = [c for c in checks if c.applicable and not c.passed]
+    if failed:
+        st.error(f"{len(failed)} check(s) failed. Don't rely on this portfolio.")
+
+
+def render_dividend_flags() -> None:
+    flags = dividend_data_flags(yields)
+    if flags.missing:
+        st.warning(
+            "No dividend data, counted as 0% and so left out of this portfolio: "
+            + ", ".join(flags.missing)
+        )
+    if flags.out_of_range:
+        st.error(
+            "Yield outside 0–100% (likely a unit or data error), left out of this portfolio: "
+            + ", ".join(f"{s} ({y:.0%})" for s, y in flags.out_of_range)
+        )
+    if flags.implausible:
+        st.warning(
+            "Implausibly high yield (above 15%): possibly a one-off special dividend, a price "
+            "crash or a currency mismatch. Still included; untick it in Confirm matches to "
+            "exclude it: " + ", ".join(f"{s} ({y:.1%})" for s, y in flags.implausible)
+        )
+    if flags.high:
+        st.info(
+            "High yield (8–15%), worth checking: "
+            + ", ".join(f"{s} ({y:.1%})" for s, y in flags.high)
+        )
+    if flags.non_payers:
+        st.caption(
+            "Paid no dividend in the last 12 months (not eligible for this portfolio): "
+            + ", ".join(flags.non_payers)
+        )
+
+
+def frontier_chart(fr, ms_result) -> go.Figure:
+    vols = np.sqrt(np.clip(np.diag(cov.to_numpy()), 0, None))
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=fr.curve.risk * 100, y=fr.curve.expected_return * 100, mode="lines",
+        name="Efficient frontier", line=dict(width=3),
+        hovertemplate="Risk %{x:.2f}%<br>Return %{y:.2f}%<extra>Frontier</extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=vols * 100, y=mu.to_numpy() * 100, mode="markers+text", text=tickers,
+        textposition="top center", name="Individual stocks", marker=dict(size=8, color="gray"),
+        hovertemplate="%{text}<br>Risk %{x:.2f}%<br>Return %{y:.2f}%<extra></extra>",
+    ))
+    for label, symbol, size in (("Min Risk", "diamond", 14), ("Max Return", "square", 12), ("Max Sharpe", "star", 20)):
+        row = fr.curve[fr.curve.label == label]
+        if row.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=row.risk * 100, y=row.expected_return * 100, mode="markers", name=label,
+            marker=dict(symbol=symbol, size=size, line=dict(width=1, color="black")),
+            hovertemplate=f"{label}<br>Risk %{{x:.2f}}%<br>Return %{{y:.2f}}%<extra></extra>",
+        ))
+    fig.update_layout(
+        xaxis_title="Annualized risk (σ, %)",
+        yaxis_title="Annualized expected return (μ, %)",
+        height=520,
+        margin=dict(l=0, r=0, t=70, b=0),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    return fig
+
+
+if result.weights is None:
+    st.error(f"Couldn't build the {choice} portfolio. {result.error}")
+    if choice == "Max Dividend":
+        render_dividend_flags()
+    st.stop()
+
+for note in result.notes:
+    st.info(note)
+if result.error:
+    st.error(f"{result.error} The portfolio below should not be relied on.")
+
+pstats = stats_of(result.weights)
+
+if choice == "Min Risk":
+    left, right = st.columns([1, 1.2])
+    with left:
+        held, excluded = render_holdings(result)
+        render_main_stats(pstats, per_row=2)
+        m5, m6, m7 = metric_slots(3, 2)
+        m5.metric("Equal-weight risk", f"{result.equal_weight_risk:.2%}",
+                  help=f"An equal share in all {len(tickers)} stocks, for comparison.")
+        m6.metric("Risk reduction", f"{result.equal_weight_risk - pstats['risk']:.2%}",
+                  help="Equal-weight risk minus optimized risk.")
+        m7.metric("Theoretical floor", f"{result.lower_bound_risk:.2%}",
+                  help=f"Lowest possible risk if the {constraints.min_weight:.1%} minimum and the "
+                  "minimum-stock rules didn't exist. The true best portfolio under all the rules "
+                  "lies between this and the optimized risk; a small gap means the result is "
+                  "essentially optimal.")
+        render_notes(held)
+    with right:
+        st.markdown("**Correlation matrix** (held stocks first, by weight)")
+        order = list(held.index) + excluded
+        corr_sorted = res.corr.loc[order, order]
+        fig = px.imshow(
+            corr_sorted,
+            text_auto=".2f",
+            zmin=-1,
+            zmax=1,
+            color_continuous_scale="RdBu",
+            aspect="auto",
+        )
+        fig.update_layout(height=max(300, 40 * len(order) + 120), margin=dict(l=0, r=0, t=10, b=0))
+        st.plotly_chart(fig, width="stretch", key="corr_min_risk")
+        st.caption(
+            "Min Risk favours stocks with low risk and low correlation to the others "
+            "(paler cells), since those lower the portfolio's overall risk."
+        )
+    render_checks(result.checks)
+
+elif choice in ("Max Return", "Max Dividend"):
+    label = "expected return" if choice == "Max Return" else "dividend yield"
+    if choice == "Max Dividend":
+        render_dividend_flags()
+    held, _ = render_holdings(result)
+    render_main_stats(pstats)
+    m5, m6, _ = st.columns(3)
+    m5.metric(f"Equal-weight {label}", f"{result.equal_weight_value:.2%}",
+              help=f"An equal share in all {len(tickers)} stocks, for comparison.")
+    m6.metric(f"Exact optimum {label}", f"{result.exact_value:.2%}",
+              help="Worked out directly: hold the top stocks, give each the 2.5% floor, then "
+              "fill the best ones up to the 30% cap. The optimizer must match it.")
+    st.caption(
+        f"Maximizing {label} is a linear goal, so the optimizer fills the best stocks up to "
+        f"the {constraints.max_weight:.0%} cap; the minimum-stock rule brings in further stocks "
+        f"at the {constraints.min_weight:.1%} floor, and one stock takes whatever is left over. "
+        "This concentration is expected, not a bug."
+    )
+    render_notes(held)
+    render_checks(result.checks)
+
+else:  # Max Sharpe
+    st.caption(
+        f"⚠️ One risk-free rate ({risk_free_rate:.2%}) is applied to every stock, although "
+        + (f"the portfolio mixes {', '.join(currencies)} stocks whose home rates differ. "
+           if len(currencies) > 1 else "home interest rates differ between markets. ")
+        + "Expected returns are price-only (dividends excluded), which understates Sharpe "
+        "ratios for dividend payers."
+    )
+    left, right = st.columns([1, 1.2])
+    with left:
+        held, _ = render_holdings(result)
+        render_main_stats(pstats, per_row=2)
+        m5, m6 = metric_slots(2, 2)
+        m5.metric("Equal-weight Sharpe", f"{result.equal_weight_sharpe:.3f}",
+                  help=f"An equal share in all {len(tickers)} stocks, for comparison.")
+        m6.metric(
+            "Theoretical ceiling",
+            f"{result.ceiling_sharpe:.3f}" if result.ceiling_sharpe is not None else "n/a",
+            help=f"Highest possible Sharpe ratio if the {constraints.min_weight:.1%} minimum and "
+            "the minimum-stock rules didn't exist (solved exactly). The true best portfolio "
+            "under all the rules lies between the optimized Sharpe and this.",
+        )
+        render_notes(held)
+    with right:
+        st.markdown("**Efficient frontier** (same rules as the portfolios)")
+        if frontier is not None:
+            st.plotly_chart(frontier_chart(frontier, result), width="stretch", key="frontier")
+            st.caption(
+                f"Lowest-risk portfolio for each target return, under the same {constraints.max_weight:.0%} "
+                f"cap, {constraints.min_weight:.1%} floor and minimum-stock rules "
+                f"({frontier.points_solved} of {frontier.points_requested} swept points solved). "
+                "The curve runs from Min Risk (left end) to Max Return (top end); Max Sharpe "
+                "is the point with the best return per unit of risk."
+            )
+    checks = list(result.checks)
+    if frontier is not None:
+        checks.append(frontier_check(frontier, result.risk, result.expected_return))
+    render_checks(checks)
