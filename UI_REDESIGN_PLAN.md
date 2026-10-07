@@ -1,0 +1,163 @@
+# UI Redesign: Context and Plan (handoff)
+
+**For a Claude / Claude Code session picking up this work.** Read this file, then `PROJECT_SPEC.md` (what the product is) and `CLAUDE.md` (build history, every decision and why) before doing anything. If this file and `PROJECT_SPEC.md` ever disagree, the spec wins; if this file and `CLAUDE.md` disagree on UI matters, this file is newer (written 2026-10-08).
+
+---
+
+## 1. The project in one paragraph
+
+Virtual Portfolio Builder is a Streamlit web app (Python) that turns a user's list of stocks into optimized virtual portfolios using Modern Portfolio Theory. No login, no trading. The user picks **one market per session** (India NSE, Australia ASX or USA), enters 10+ stocks by ticker or company name, confirms the matches, and the app fetches 5 years of daily prices from Yahoo Finance (yfinance), computes returns/risk/covariance, and builds **four V1 (Markowitz) portfolios**: Min Risk, Max Return, Max Dividend and Max Sharpe, plus an efficient frontier. V2 (Risk Parity) and V3 (Black-Litterman) are planned later. Live app on Streamlit Community Cloud; repo `rahulpalit07/virtual-portfolio-builder`, branch `main`. Owner: Rahul Palit.
+
+## 2. Where things stand (2026-10-08)
+
+- Latest pushed commit: `b74f80f` "One market per session; 10-year government bond yield as risk-free rate". Working tree clean apart from this file.
+- V1 is functionally complete and tested (see `CLAUDE.md` Status). All calculations are verified (brute-force optimum checks, exact closed-form checks, theoretical bounds).
+- Files:
+  - `app.py`: Streamlit UI only (~960 lines). **This redesign changes this file** (plus a new theme file).
+  - `data.py` (resolution + fetching), `stats.py` (returns, μ, σ, covariance), `optimizer.py` (constraints + four portfolios), `frontier.py` (efficient frontier), `rates.py` (risk-free rate = market's 10-year bond yield from CNBC, fallback in `fallback_rates.json`). **Do not change these** (see hard rules).
+  - `PROJECT_SPEC.md`: authoritative spec. **Do not modify.**
+  - `CLAUDE.md`: master progress document. Keep it comprehensive (never shorten it); update it at the end with the UI decisions.
+- Current page order (the problem): Market → 1. Enter stocks → 2. Confirm matches → 3. Data → 4. Returns & risk → 5. Portfolios. The answer (the portfolios) appears last, below ~4 screens of data tables.
+
+## 3. Goal of this work
+
+Redesign the **presentation layer only** for two audiences:
+1. A first-time user who wants a portfolio from their stocks.
+2. A recruiter who will spend about one minute on it.
+
+## 4. HARD RULES (non-negotiable)
+
+1. **Do not change any calculation, optimizer, constraint, data fetch or result.** Every number the app produces must be identical before and after.
+2. **Do not modify `PROJECT_SPEC.md`.**
+3. `data.py`, `stats.py`, `optimizer.py`, `frontier.py`, `rates.py`, `fallback_rates.json` must show **zero diff** after every pass. All work happens in `app.py` and new presentation files (e.g. `.streamlit/config.toml`).
+4. Respect the spec's existing rules, which the UI must still honour:
+   - **One market per session; the user explicitly chooses it; nothing pre-selected** (spec 2.6). Switching market asks for confirmation and clears the session (already built; keep it).
+   - **Out-of-market stocks are flagged and start unticked**; the user can include them (spec 2.6).
+   - **The risk-free rate shown must include its value, source and as-of date, and a fallback must be stated explicitly** (spec 3.4). The fallback notice must stay prominent; it must not be hidden only in the sidebar.
+5. No new packages (everything needed is already in `requirements.txt`: streamlit, plotly, pandas, jinja2…). If something seems to need a new package, stop and ask.
+6. Work in passes; **stop after each pass** for the user's review; **commit locally after each pass, do not push**.
+
+## 5. Decisions already made by the user (do not reopen)
+
+| # | Decision |
+|---|---|
+| Flow | "1. Your stocks" → "2. Your portfolios" → collapsed "Under the hood". |
+| Header | Replace the subtitle "V1 · Data, returns, risk, covariance and four optimized portfolios" with a plain-English one-liner. |
+| Examples | **One example per market** (the cross-market example from the original brief is not allowed by the spec). Clicking an example is an explicit market choice and goes **in one click straight to results** (fill → find → build). Lists below. |
+| Selector | **Segmented control** (`st.segmented_control`, available in Streamlit 1.65) instead of tabs or dropdown. Reason: tabs render all four views (and their charts) on every rerun and charts in hidden tabs can mis-size; the segmented control renders only the selected view. |
+| Parallel fetching | **Yes**, done in `app.py` with threads (4–6 workers) calling the existing `data.resolve` / `data.fetch_ticker_data` functions; `data.py` unchanged. Tested 2026-10-08: ~5× faster (resolve ~7 s → ~2 s, fetch ~7–9 s → ~1–3 s for 11 stocks). Close, Dividends and dividend yield were identical to sequential fetches in 3 runs; only Yahoo's **Adj Close** column differs by ≤ 7e-7 relative in parallel (a yfinance quirk). Adj Close is **not used in any calculation** (returns use Close), so all app numbers stay identical; only the raw price tables under the hood may differ in the 7th significant digit. |
+| Freeze stats | **No.** Keep current behaviour (stats recompute on rerun; if a market closes between reruns, today's price becomes final and numbers can shift slightly). |
+| Theme | **Teal** primary colour (around `#0F766E`) via `.streamlit/config.toml`; red reserved for errors. Plain-English labels in the main view; Greek symbols (μ, σ, Σ) only under the hood. The correlation heatmap keeps its red–blue scale (red = negative correlation there, not an error). |
+| Sidebar | Holds settings (minimum stocks held, risk-free rate + its source/as-of line). Appears **only after a market is chosen**. |
+| Footer | "Educational tool, not financial advice · Rahul Palit · LinkedIn (https://www.linkedin.com/in/rahul-palit/)". GitHub: use the repo URL `https://github.com/rahulpalit07/virtual-portfolio-builder` unless the user says otherwise (not yet confirmed). |
+| Regression lists | The three example lists double as the fixed regression lists. |
+
+### Example lists (verified 2026-10-08: all resolve as exact tickers, no out-of-market flags, all 11 pay dividends so Max Dividend always works)
+
+| Market | Stocks |
+|---|---|
+| India (NSE) | RELIANCE, TCS, HDFCBANK, INFY, ICICIBANK, ITC, HINDUNILVR, BHARTIARTL, LT, SBIN, ASIANPAINT |
+| Australia (ASX) | BHP, CBA, CSL, NAB, WBC, ANZ, WES, WOW, TLS, RIO, MQG |
+| USA | AAPL, MSFT, JNJ, KO, PG, JPM, XOM, WMT, PEP, MRK, HD |
+
+## 6. Target design
+
+### 6.1 Tiers for every element
+🟢 always visible · 🟡 one click away (expander / tooltip / sidebar) · ⚪ hidden unless something goes wrong.
+
+| Element (current) | Tier | New presentation |
+|---|---|---|
+| Title + subtitle | 🟢 | Title + plain-English one-liner |
+| Market radio | 🟢 | Top of "1. Your stocks", with "Try an example" buttons (one per market) |
+| Market-switch confirmation | 🟢 when triggered | Unchanged |
+| Input table + Resolve | 🟢 | Same; rename buttons "Find stocks" and "Build portfolios" |
+| Confirm-matches rows | 🟡/🟢 | Expander "✅ N stocks matched"; **auto-expands** if any row is auto-picked, unmatched, out-of-market-flagged, switched listing, or duplicate |
+| Auto-picked warning | 🟢 once | Prominent in the confirm step only; results show a small icon with a tooltip (column help) |
+| "< 10 stocks" warning, "Will skip…" | 🟢 | One line under "Build portfolios" |
+| "Based on N stocks" | 🟢 | Summary line, e.g. "11 stocks · 5 years of daily prices · to 7 Oct 2026" (+ skipped/failed counts if non-zero) |
+| Included / Skipped / Failed tables, raw data per stock | 🟡 | Under the hood |
+| Returns-method caption, portfolio rules caption, price-only caveat | 🟡 | "Methodology & limitations" expander |
+| Mixed-currency / cross-exchange warnings | ⚪ | Only appear if the user includes an out-of-market stock (only possible via override now) |
+| "Market still open" note | 🟡 | Under the hood |
+| Returns & risk table (μ, σ, CAGR…) | 🟡 | Under the hood |
+| Data sanity checks | ⚪ | Under the hood; **red banner at top of results if any fail** |
+| Data-quality flags (short history, extremes, near-duplicates) | 🟡/🟢 | **One visible summary line**; details under the hood (they shape results, so not fully hidden) |
+| Covariance matrix, correlation heatmap/table | 🟡 | Under the hood (correlation also stays as the Min Risk side panel) |
+| Minimum stocks, risk-free rate inputs | 🟡 | Sidebar (keep the same widget keys so values aren't reset) |
+| Risk-free source / as-of line | 🟢/🟡 | Sidebar + caption on the Max Sharpe view |
+| **Fallback-rate warning** | 🟢 when it occurs | Prominent in results (spec requirement) |
+| Rate-overridden notice, covariance-repair note, swap time-limit note | 🟢 when they occur | Visible notices near results |
+| Comparison table | 🟢 | Top of results; drop the Note column; **highlight best per column** (max return/yield/Sharpe, min risk); keep "Equal weight (reference)" row; full height, no internal scrolling |
+| Portfolio dropdown | 🟢 | Segmented control |
+| Holdings table | 🟢 | Horizontal **bar chart** of weights (Plotly) + compact table (ticker, company, weight; Match as an icon column with tooltip) |
+| "Not held (0%)" list | 🟢 | Small caption |
+| Headline figures | 🟢 | Four metric cards: Expected return, Risk, Dividend yield, Sharpe ratio, with **"vs equal weight" deltas** (replacing the separate equal-weight figures) |
+| Theoretical floor / Sharpe ceiling / exact optimum | 🟡 | Inside the checks expander |
+| "Why this portfolio" | 🟢 | One plain-English line per portfolio |
+| Dividend data flags | 🟢/🟡 | Max Dividend view: missing/implausible as warnings, non-payers as a caption |
+| Side panels | 🟢 | **Unchanged**: Min Risk → correlation matrix; Max Sharpe → efficient frontier; Max Return / Max Dividend → none (full width) |
+| Verification checks | 🟡 | One line "✅ All N checks passed" that expands; a red banner if any fail |
+| *(new)* Methodology & limitations | 🟡 | Expander: data source & 5-year window; daily simple returns; price-only (dividends excluded); 30% cap, 2.5% floor, minimum stocks; risk-free rate = market 10-year yield (CNBC, fallback file); one market per session so one currency (no conversion; an included out-of-market stock keeps its own currency) |
+| *(new)* Footer | 🟢 | See decisions table |
+
+### 6.2 Wireframe (top to bottom)
+
+```
+SIDEBAR (only after a market is chosen)  │ MAIN
+ Settings                                │ Virtual Portfolio Builder
+  Minimum stocks held   [ 4 ]            │ <plain-English one-liner>
+  Risk-free rate %      [ … ]            │
+  ⓘ <market> 10-yr yield, CNBC,          │ ── 1. Your stocks ───────────────────────
+    as of <time> (live/fallback)         │ Market: ( ) India (NSE) ( ) Australia (ASX) ( ) USA
+ Methodology & limitations ▸             │ No list handy? [Try India example] [Try ASX] [Try US]
+                                         │ [input table]                   [Find stocks]
+                                         │ ▸ ✅ 11 stocks matched   (auto-opens on any ⚠️)
+                                         │ [Build portfolios]  11 stocks · 5 y daily · to <date>
+                                         │
+                                         │ ── 2. Your portfolios ───────────────────
+                                         │ (red banner only if a check fails; fallback /
+                                         │  repair notices if any)
+                                         │ Comparison table (best per column highlighted)
+                                         │ [ Min Risk | Max Return | Max Dividend | Max Sharpe ]
+                                         │ "Why this portfolio" line
+                                         │ [Return] [Risk] [Yield] [Sharpe]  (Δ vs equal weight)
+                                         │ ┌ weights bar chart + table ┬ side panel (per rules) ┐
+                                         │ ▸ ✅ All N checks passed (incl. floor/ceiling/exact)
+                                         │
+                                         │ ── Under the hood ▸ (collapsed) ─────────
+                                         │   data coverage · raw prices · returns & risk ·
+                                         │   flags · sanity checks · covariance · correlation
+                                         │ ▸ Methodology & limitations
+                                         │ Footer
+```
+
+### 6.3 Ready for V2 and V3 without another redesign
+Drive the results area from a **portfolio registry** in `app.py`: a list of entries, each with name, cached compute function, "why" line, extra figures, side-panel renderer. The comparison table, segmented control and views are generated from it. V2 (Risk Parity) = one more entry (side panel: per-stock risk contributions, per spec 4.4). V3 (Black-Litterman) = one more entry plus a "Your views" input panel inside its own view. The segmented control fits ~6 options.
+
+## 7. Technical notes and pitfalls
+
+- **State:** results live in `st.session_state` (`resolutions`, `fetched`); portfolios and frontier are `st.cache_data`-cached on their exact inputs, so sidebar changes recompute only portfolios and never re-fetch. Keep existing widget keys when moving widgets (e.g. the risk-free input key `rf_{market}_{value}`, `inc_*`, `pick_*`, `market_radio_{n}`, `input_{n}`), or settings/choices reset.
+- **Example buttons:** fill the input table by bumping `ss.input_version` (the existing mechanism that recreates the data editor), set `ss.market` (and bump `ss.market_version` so the radio shows it), then run find + build automatically.
+- **Parallel fetching:** run the plain `data.resolve` / `data.fetch_ticker_data` in a `ThreadPoolExecutor(max_workers≈6)` inside `app.py`; don't call Streamlit functions from worker threads; keep results in session state as today. Keep the one-per-stock currency lookup (`listing_currency`) cached; it can also be parallelized.
+- **Tables:** set explicit heights (rows × ~35 px + header) so nothing scrolls internally or clips the first/last row.
+- **Highlighting:** pandas Styler (jinja2 already listed) on `st.dataframe`.
+- **Streamlit quirks seen in this project:** the dev server doesn't reliably hot-reload imported modules (restart it after editing them); the in-app browser pane is sometimes hidden, so screenshots/clicks fail: use Streamlit's `AppTest` (`streamlit.testing.v1`) to drive the real app instead; the data editor can't be typed into via `AppTest`, so set `session_state["resolutions"]` (or use the example buttons). On Windows, run Python with `PYTHONIOENCODING=utf-8` when printing symbols. Run `pyflakes` on `app.py` before testing (it caught a real name-clash bug before).
+
+## 8. Regression check (run before Pass 1 and after every pass)
+
+1. **Baseline, before any change:** for each of the three example lists, fetch the data once and **snapshot it to files** (pickled `TickerData` per stock + the risk-free rate per market) in a scratch folder outside the repo.
+2. A harness drives `app.py` with `AppTest`, replacing the fetch and rate lookups with the snapshots, so old and new code see identical inputs (live prices and yields move during the day).
+3. Record, per market: all four portfolios' **full weight vectors**, expected return, risk, dividend yield, Sharpe, the equal-weight row, the Sharpe ceiling, the risk floor, and the number of frontier points. Read numeric values, not formatted text.
+4. After each pass: compare to the baseline at full precision (must be identical); confirm `git diff` shows **zero changes** to `data.py`, `stats.py`, `optimizer.py`, `frontier.py`, `rates.py`, `fallback_rates.json`, `PROJECT_SPEC.md`; run `pyflakes`.
+5. Report the result to the user, commit locally (no push), stop.
+
+## 9. Build plan (stop after each pass)
+
+- **Pass 0: baseline.** Snapshot data and record the regression baseline from the *current* code (commit `b74f80f`). No app changes.
+- **Pass 1: layout and flow.** New section order and tiers; collapsed confirm step with auto-expand rules; "Under the hood" expander; sidebar settings; segmented control; example buttons (one-click to results); parallel resolve/fetch; Methodology & limitations; footer; checks collapsed to one line (floor/ceiling/exact inside); fallback and failure notices kept prominent; table heights fixed. → Regression check, commit locally, stop for review.
+- **Pass 2: charts and metric cards.** Weights bar chart + compact table; metric cards with "vs equal weight" deltas; comparison table highlighting; "why this portfolio" lines; Match icons with tooltips. → Regression check, commit locally, stop.
+- **Pass 3: theme and polish.** `.streamlit/config.toml` with teal primary; plain-English labels (Greek only under the hood); wording and spacing polish. → Regression check, commit locally, stop.
+- **Finish:** update `CLAUDE.md` with all UI decisions (add, don't shorten), commit locally. **Push only when the user asks.**
+
+## 10. Open item to confirm with the user
+- GitHub link in the footer: repo URL above, or leave it out.
