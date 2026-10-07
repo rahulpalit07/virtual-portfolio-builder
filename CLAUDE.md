@@ -71,7 +71,9 @@ Note: Streamlit does not hot-reload `data.py`/`stats.py`/`optimizer.py`/`frontie
   - **Tested (scripted):** 12 mixed NSE/ASX/USA stocks and 11 volatile stocks, minimum 4 and 5. Max Return and Max Dividend matched the exact optimum every time (e.g. 30/30/30/10 at min 4; 30/30/30/7.5/2.5 at min 5). **Max Sharpe matched a brute-force search over every allowed set of held stocks** (0.8646 = 0.8646; 1.4347 = 1.4347) and the theoretical ceiling. Frontier: 18/18 swept points solved; Max Sharpe 0.01–0.04 points left of the swept curve. Edge cases: only 4 dividend payers with minimum 5 → "Not enough stocks pay dividends…" error; risk-free rate above every achievable return → clear error; dividend flags for missing, non-payer, high (10%), implausible (30%) and out-of-range (250%) values. Timing for 12 stocks: all four portfolios + frontier ≈ 0.7 s.
   - **Tested in the browser** (AAPL, Reliance, BHP, JNJ, KO, PG; rf 4%): Min Risk 6 held, σ 11.20%, Sharpe 0.504; Max Return AAPL/BHP.AX/KO 30% + JNJ 10%, 15.54% (= exact); Max Dividend BHP.AX/PG/KO 30% + JNJ 10%, yield 2.96% (= exact); Max Sharpe AAPL 30%, BHP.AX 29.37%, JNJ 24.47%, KO 16.15%, Sharpe 0.828 (= ceiling), 0.20 points left of the swept frontier; equal weight Sharpe 0.573. All checks pass in all four views; switching the dropdown is instant; changing rf to 5% recomputed Max Sharpe (Sharpe 0.757 = ceiling).
   - Deployment check on Streamlit Cloud: pending after the step 4 push.
-- [ ] **Next: to be decided with the user.** V1's four portfolios and their output are now complete (the planned "Step 5: portfolio output UI" was delivered as part of step 4). Candidates: deployment check of steps 2–4, then V2 (Risk Parity).
+  - Committed and pushed as `8cae675` (2026-10-07).
+- [x] **Scope change: spec updated (2026-10-07), implementation PENDING.** `PROJECT_SPEC.md` now requires one market per session and the selected market's 10-year government bond yield as the Max Sharpe risk-free rate (see "Scope change 2026-10-07" below). **The code has NOT been changed yet:** the app still uses a per-stock exchange tag, allows mixed markets and uses a fixed 4% default risk-free rate. 
+- [ ] **Next session: implement the scope change** (see "Scope change 2026-10-07: what the implementation must do" below). Then: deployment check of steps 2–4 + the scope change, then V2 (Risk Parity).
 
 ### V2 (Risk Parity): not started
 ### V3 (Black-Litterman): not started
@@ -147,9 +149,43 @@ Note: Streamlit does not hot-reload `data.py`/`stats.py`/`optimizer.py`/`frontie
 - **Equal-weight comparisons** use all included stocks (all, including non-payers, for Max Dividend) and show "not applicable" when equal weight itself breaks the rules (e.g. > 40 stocks).
 - **Sharpe ratio is shown for every portfolio**, including Min Risk (display only; Min Risk weights unchanged).
 
+### Scope change 2026-10-07: one market per session, 10-year bond yield as risk-free rate (spec updated; code NOT yet changed)
+User decisions (final; recorded in PROJECT_SPEC.md Sections 2.1, 2.2, 2.6 (new), 3.4, 6 and 9 (new)):
+1. **One market per session.** At the very start the user explicitly selects exactly one of India (NSE), Australia (ASX) or USA. **No market is pre-selected.** Never mixed in a session.
+2. **Every stock entered is assumed to belong to the selected market.** No per-stock exchange tag any more; name/ticker resolution is scoped to the selected market only.
+3. **Anything that doesn't look like it belongs to the selected market** (wrong exchange, wrong currency, wrong ticker suffix, foreign or dual listing) **is flagged, not silently included.** The user is never blocked: they can skip a flagged row or override the flag and include it, consistent with the existing Confirm-matches skip/ignore behaviour.
+4. **Risk-free rate = the selected country's 10-year government bond yield** (India 10Y, Australia 10Y, US 10Y). The user can still override it manually. The app must show the value used, its source and its as-of date, and must say explicitly when a fallback value is used instead of a live one.
+5. **One currency per session**, so the mixed INR/AUD/USD limitation no longer applies within a session (once implemented). Currency conversion and cross-market portfolios remain out of scope.
+6. **Min Risk, Max Return and Max Dividend are unaffected.** Only Max Sharpe, the Sharpe ratios and the efficient frontier change, and only because the risk-free rate changes.
+
+Open decisions answered by the user (2026-10-07), now written into the spec as rules:
+- **India = NSE only.** BSE is not supported; BSE listings are flagged as outside the market.
+- **Switching market asks for confirmation first; for now, confirming clears the session's progress** (entered stocks and all results).
+- **Market choice is explicit** (no default).
+- **10-year yield data source: Bloomberg (bloomberg.com) government bond pages** (user's choice).
+
+**Open decisions still to resolve during implementation** (marked "Open decision" in the spec; record the answers here):
+1. **Exact criteria for flagging a foreign or dual listing** (spec 2.6). E.g. an ADR such as INFY (Infosys, NYSE) entered in a USA session; how to detect "primary listing elsewhere".
+2. **How India's 10-year yield is obtained** (spec 3.4): no Bloomberg page found for it (see below).
+3. **Fallback yields: what the values are, how they're stored, how they're kept up to date** (spec 3.4).
+
+**Bloomberg feasibility check (2026-10-07, before writing the spec):**
+- `https://www.bloomberg.com/markets/rates-bonds/government-bonds/us` and `/australia`: HTTP 200 from a script (with a browser user-agent); the yields are embedded in the page HTML (e.g. `"yield":4.11…` near the `GT10:GOV` 10-year entry), so they can be parsed without a browser.
+- `/government-bonds/india` and `https://www.bloomberg.com/quote/GIND10YR:IND`: HTTP 404, so no India page was found.
+- **Risks to handle in implementation:** Bloomberg's terms of use restrict automated scraping; its bot protection may block Streamlit Cloud's shared servers even though a local request worked; page layout changes would break parsing. All of these must fall back cleanly, with the on-screen "fallback value used" notice the spec requires. "A simple Google search" can't be done by the app at runtime without a paid search API, so the spec names the Bloomberg pages directly.
+
+**Scope change 2026-10-07: what the implementation must do** (next session; check against the spec before starting):
+- Add an explicit market selector at the very start (no default); confirmation dialog on switching that clears all session progress.
+- Remove the per-row Exchange column from the input table; resolve every input against the selected market only (`data.resolve` / `EXCHANGE_SEARCH_CODES` scoped to one market).
+- Flag rows that don't look like they belong to the market (wrong exchange, currency, suffix, foreign/dual listing) in Confirm matches, with skip/override, never blocking. BSE (`.BO`) listings in an India session are flagged.
+- Fetch the 10-year yield for the selected market (Bloomberg, with fallback); show value, source, as-of date and a clear fallback notice; keep the manual override input (pre-filled with the fetched value).
+- Remove the mixed-currency and cross-exchange-correlation notices that can no longer occur within a session (or keep them only if a user override brings in a foreign-currency stock; decide when implementing the flags).
+- Min Risk, Max Return and Max Dividend logic stays unchanged; only Max Sharpe, the Sharpe ratios and the frontier change via the risk-free rate.
+- `requirements.txt` will likely need an HTML-parsing package if Bloomberg pages are parsed (e.g. `beautifulsoup4`, or plain `re`/`json` parsing to avoid it); decide during implementation.
+
 ## Known limitations / risks
-- **Currency (not handled, per spec Section 6; user will revisit):** each stock's μ, σ and covariances are in its own currency (INR/AUD/USD), with no conversion. Effects: (1) returns in weaker or higher-inflation currencies look higher (INR has historically depreciated ~2–4%/yr vs USD), so Max Return/Max Sharpe will lean towards NSE stocks partly for that reason; (2) σ excludes FX risk for a foreign investor; (3) cross-exchange correlations miss shared currency moves. Within a single exchange the numbers are fine; comparisons across exchanges are biased, mainly on returns. The app shows a ⚠️ mixed-currency warning whenever included stocks span more than one currency.
-- **Cross-exchange correlations are understated with daily returns.** NSE/ASX close before the US opens, so a US move shows up in Asian/Australian prices a day later. Measured: Infosys NSE vs NYSE ADR daily correlation 0.49 (weekly 0.80, monthly 0.97); BHP ASX vs NYSE 0.36 (weekly 0.82, monthly 0.94). The optimizer will therefore see more diversification between exchanges than really exists. The app shows a note when stocks span exchanges. Weekly returns would fix most of this if revisited.
+- **Currency (not handled, per spec Section 6):** *Will no longer apply within a session once the 2026-10-07 scope change (one market per session) is implemented; until then, the current code still allows mixed markets.* each stock's μ, σ and covariances are in its own currency (INR/AUD/USD), with no conversion. Effects: (1) returns in weaker or higher-inflation currencies look higher (INR has historically depreciated ~2–4%/yr vs USD), so Max Return/Max Sharpe will lean towards NSE stocks partly for that reason; (2) σ excludes FX risk for a foreign investor; (3) cross-exchange correlations miss shared currency moves. Within a single exchange the numbers are fine; comparisons across exchanges are biased, mainly on returns. The app shows a ⚠️ mixed-currency warning whenever included stocks span more than one currency.
+- **Cross-exchange correlations are understated with daily returns.** *(Also no longer applies within a session once one market per session is implemented.)* NSE/ASX close before the US opens, so a US move shows up in Asian/Australian prices a day later. Measured: Infosys NSE vs NYSE ADR daily correlation 0.49 (weekly 0.80, monthly 0.97); BHP ASX vs NYSE 0.36 (weekly 0.82, monthly 0.94). The optimizer will therefore see more diversification between exchanges than really exists. The app shows a note when stocks span exchanges. Weekly returns would fix most of this if revisited.
 - **Forward-filled holidays** add 0% days, which slightly lowers σ and correlations.
 - **Dividends excluded from returns** (price-only `Close`): μ is understated for dividend payers by roughly their yield.
 - **Pairwise covariance with different history lengths can be non-positive-semi-definite.** The PSD check flags it; step 3 must repair it (e.g. nearest PSD matrix) before optimizing.
@@ -163,7 +199,7 @@ Note: Streamlit does not hot-reload `data.py`/`stats.py`/`optimizer.py`/`frontie
   - Step 3 adds no new packages (`cvxpy`/`pyscipopt` were considered and rejected; see step 3 decisions).
   - Step 4 adds no new packages: the frontier chart uses `plotly.graph_objects` (part of `plotly`, already listed); all optimization stays in `scipy`.
 - **`.gitignore`** excludes: virtual environments (`.venv/`, `venv/`, `env/`), Python caches (`__pycache__/`, `*.py[cod]`, `.pytest_cache/`, `.mypy_cache/`, `.ipynb_checkpoints/`), secrets (`.env`, `.env.*`, `.streamlit/secrets.toml`), temp/log/OS files (`*.log`, `*.tmp`, `.DS_Store`, `Thumbs.db`) and local Claude Code tooling (`.claude/`).
-- `PROJECT_SPEC.md` has not been modified since the initial commit.
+- `PROJECT_SPEC.md` was unchanged from the initial commit until **2026-10-07**, when it was updated for the one-market-per-session scope change (Sections 2.1, 2.2, 2.6 new, 3.4, 6, 9 new; see Section 9 "Revision history" in the spec).
 
 ## Notes for step 3 (Min Risk portfolio): all addressed
 - Use `StatsResult.cov` from `stats.compute_stats` as Σ; put the optimizer in `optimizer.py`. **Done.**
@@ -183,7 +219,8 @@ Note: Streamlit does not hot-reload `data.py`/`stats.py`/`optimizer.py`/`frontie
 ## Open questions / next up
 - Resolve/fetch run sequentially (~2–3 s per stock). Could be run in parallel if 10–20 stock lists feel slow.
 - `requirements.txt` includes `riskparityportfolio`; may not install on Python 3.14 / Windows locally. Revisit in V2.
-- Currency handling: user will revisit later (see Known limitations).
+- Currency handling: resolved by the 2026-10-07 scope change (one market per session); implementation pending.
+- Scope-change open decisions (dual-listing criteria, India 10-year yield source, fallback yields): see "Scope change 2026-10-07".
 - Weekly returns: possible later fix for understated cross-exchange correlations.
-- Risk-free rate default (4%) is a placeholder not verified for 2026; the user may want a current figure.
+- Risk-free rate default (4%) is a placeholder not verified for 2026; to be replaced by the selected market's 10-year yield in the scope-change implementation.
 - With very large lists (30–40 stocks), the swap step may hit its 5 s limit; watch for the on-screen note on Streamlit Cloud.

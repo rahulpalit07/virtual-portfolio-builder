@@ -23,14 +23,15 @@ All three versions share the same data ingestion, the same stock universe input,
 ## 2. Shared architecture (applies to V1, V2, and V3)
 
 ### 2.1 User input
-- User provides a list of **10 or more stock tickers**, each tagged with its exchange: India (NSE), Australia (ASX), or USA.
-- The system must map exchange → correct ticker suffix/format for the data source (e.g. `.NS` for NSE, `.AX` for ASX, plain ticker for US exchanges).
+- User provides a list of **10 or more stock tickers**, all belonging to the single market selected for the session (see Section 2.6). There is no per-stock exchange tag.
+- The system must map the selected market → correct ticker suffix/format for the data source (e.g. `.NS` for NSE, `.AX` for ASX, plain ticker for US exchanges).
 - No login, no account, no saved user profile. Each session is a fresh input.
 
 ### 2.2 Data fetching
 - Historical price data is fetched from a public data source (e.g. `yfinance` in Python, or `yahoo-finance2` in Node) for each ticker.
-- Lookback window: 3–5 years of historical data (daily or monthly granularity — daily preferred for more precise covariance estimation, monthly acceptable if data availability across all three exchanges is inconsistent).
+- Lookback window: 3–5 years of historical data (daily or monthly granularity — daily preferred for more precise covariance estimation, monthly acceptable if data availability across the selected market's stocks is inconsistent).
 - Dividend yield (trailing twelve months) is fetched per ticker from the same source for use in the max-dividend portfolio (V1) and general reference.
+- The selected market's 10-year government bond yield is fetched for use as the risk-free rate in the Max Sharpe portfolio (see Section 3.4).
 - No historical data is currently stored in a database across sessions — each request fetches fresh (a future optimization could cache this, but it is not required for V1–V3).
 
 ### 2.3 Core calculations (computed once per request, reused across all portfolio types)
@@ -48,6 +49,15 @@ All three versions share the same data ingestion, the same stock universe input,
 - For each portfolio produced, output is a list of `{stock, weight %}` pairs. Weight is the percentage of that specific portfolio, not a share of some combined total across multiple portfolios.
 - The system does **not** need to show how capital is split across multiple portfolios simultaneously (e.g. "60% in Max Return, 40% in Min Risk") — each portfolio type is a self-contained, independent 100% allocation.
 - Optionally display each portfolio's resulting aggregate expected return, risk, dividend yield, or Sharpe ratio (whichever are relevant to that portfolio type) so the user can see the trade-off between portfolio types at a glance.
+
+### 2.6 Market selection (one market per session)
+- At the start of each session the user explicitly selects exactly one market: India (NSE), Australia (ASX), or USA. No market is pre-selected. A session never mixes markets.
+- India means NSE only; BSE listings are not supported and are flagged as outside the selected market.
+- Every stock the user enters is assumed to belong to the selected market. Name/ticker resolution is scoped to the selected market only.
+- Anything that does not look like it belongs to the selected market (wrong exchange, wrong currency, wrong ticker suffix, or a foreign or dual listing) must be flagged to the user, not silently included. The user is never blocked: they can skip a flagged stock, or override the flag and include it.
+- Switching market during a session asks the user for confirmation first. For now, confirming the switch clears the session's progress (entered stocks and all results).
+- Because a session has exactly one market, all stocks in a session share one currency. Currency conversion and cross-market portfolios remain out of scope (see Section 6).
+- **Open decision** (to be confirmed during implementation and recorded in CLAUDE.md): the exact criteria for flagging a stock as a foreign or dual listing.
 
 ---
 
@@ -72,7 +82,10 @@ V1 produces **four independent portfolios**, each solving a different constraine
 
 ### 3.4 Max Sharpe Ratio Portfolio (Tangency Portfolio)
 - **Objective**: maximize (Σ(w_i × μ_i) − r_f) / sqrt(w^T Σ w)
-- Where r_f is a risk-free rate (can be a hardcoded reasonable constant, e.g. current short-term government bond yield for the relevant market, or a configurable parameter — does not need to be fetched live for V1).
+- Where r_f is the risk-free rate: the selected market's 10-year government bond yield (India 10Y, Australia 10Y or US 10Y; see Section 2.6). The user can override it manually. The app must show the value used, its source and its as-of date, and must say explicitly when a fallback value is being used instead of a live one.
+- Data source for the 10-year yield: Bloomberg (bloomberg.com) government bond pages.
+  - **Open decision** (to be confirmed during implementation and recorded in CLAUDE.md): how India's 10-year yield is obtained, since no Bloomberg page for it was found in an initial check.
+  - **Open decision** (to be confirmed during implementation and recorded in CLAUDE.md): what the fallback values are, how they are stored, and how they are kept up to date.
 - This is the portfolio with the best risk-adjusted return and is the point on the efficient frontier a rational risk-neutral-on-a-per-unit-of-risk-basis investor would choose.
 - Solved via the same optimizer family as the other three, with a nonlinear objective (or transformed into a quadratic programming form, a standard technique for tangency portfolio solving).
 
@@ -160,6 +173,7 @@ Users who *do* have a market opinion or view on one or more specific stocks and 
 - No user accounts, login, or saved portfolio history across sessions in V1–V3.
 - No requirement to show a combined "how much of my total capital goes into which portfolio type" view — each portfolio type is independently 100% allocated.
 - No historical backtesting, Monte Carlo simulation, resampling (Michaud), Hierarchical Risk Parity, VaR/CVaR, or currency normalization across exchanges are in scope for V1–V3. These were discussed as *possible future extensions* but are explicitly deferred and should not be built unless the user explicitly requests a new version (V4+) for them.
+- No cross-market portfolios: each session uses exactly one market (see Section 2.6). Currency conversion remains out of scope.
 
 ## 7. Build order
 
@@ -172,3 +186,6 @@ Users who *do* have a market opinion or view on one or more specific stocks and 
 - Any new Claude or Claude Code session working on this project should read this document in full before making design decisions.
 - This document should be treated as stable and authoritative. It should only be edited when the user explicitly changes project scope or requirements — not silently reinterpreted or "improved upon" by an assistant mid-session.
 - Day-to-day build status, decisions log, and "what's next" tracking belongs in the separate `CLAUDE.md` file, not this document.
+
+## 9. Revision history
+- **2026-10-07**: One market per session (India NSE, Australia ASX or USA); stocks that don't appear to belong to the selected market are flagged, never silently included, and never block the user. Max Sharpe's risk-free rate is now the selected market's 10-year government bond yield (user-overridable, with value, source, as-of date and any fallback shown). Changed: Sections 2.1, 2.2, 2.6 (new), 3.4, 6, 9 (new).
