@@ -1,0 +1,18 @@
+{
+  "_about": "Fallback 10-year government bond yields, used as the Max Sharpe risk-free rate ONLY when the live CNBC fetch fails (PROJECT_SPEC.md Section 3.4). The app always says on screen when one of these is used, with its as-of date. To update: replace yield_percent and as_of for a market with a current value (e.g. from https://www.cnbc.com/quotes/US10Y, /IN10Y, /AU10Y-AU) and record the update in CLAUDE.md. A fallback older than 90 days is shown with an extra 'may be out of date' warning.",
+  "India (NSE)": {
+    "yield_percent": 7.214,
+    "as_of": "2026-10-07",
+    "source": "CNBC, Indian 10-Year (IN10Y), recorded manually"
+  },
+  "Australia (ASX)": {
+    "yield_percent": 5.413,
+    "as_of": "2026-10-07",
+    "source": "CNBC, Australia 10 Year Bond (AU10Y-AU), recorded manually"
+  },
+  "USA": {
+    "yield_percent": 5.309,
+    "as_of": "2026-10-07",
+    "source": "CNBC, U.S. 10 Year Treasury (US10Y), recorded manually"
+  }
+}

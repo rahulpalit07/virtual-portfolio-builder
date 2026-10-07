@@ -57,7 +57,7 @@ All three versions share the same data ingestion, the same stock universe input,
 - Anything that does not look like it belongs to the selected market (wrong exchange, wrong currency, wrong ticker suffix, or a foreign or dual listing) must be flagged to the user, not silently included. The user is never blocked: they can skip a flagged stock, or override the flag and include it.
 - Switching market during a session asks the user for confirmation first. For now, confirming the switch clears the session's progress (entered stocks and all results).
 - Because a session has exactly one market, all stocks in a session share one currency. Currency conversion and cross-market portfolios remain out of scope (see Section 6).
-- **Open decision** (to be confirmed during implementation and recorded in CLAUDE.md): the exact criteria for flagging a stock as a foreign or dual listing.
+- A company belongs to the selected market when the listing used is on the selected market's exchange and priced in its currency; that listing's price and currency are used (so a company with its primary listing elsewhere is fine if it is listed on the selected exchange). A stock is flagged when its listing is on another exchange, is priced in another currency, or carries another market's ticker suffix. Flagged stocks start excluded; the user can include them.
 
 ---
 
@@ -83,9 +83,7 @@ V1 produces **four independent portfolios**, each solving a different constraine
 ### 3.4 Max Sharpe Ratio Portfolio (Tangency Portfolio)
 - **Objective**: maximize (Σ(w_i × μ_i) − r_f) / sqrt(w^T Σ w)
 - Where r_f is the risk-free rate: the selected market's 10-year government bond yield (India 10Y, Australia 10Y or US 10Y; see Section 2.6). The user can override it manually. The app must show the value used, its source and its as-of date, and must say explicitly when a fallback value is being used instead of a live one.
-- Data source for the 10-year yield: Bloomberg (bloomberg.com) government bond pages.
-  - **Open decision** (to be confirmed during implementation and recorded in CLAUDE.md): how India's 10-year yield is obtained, since no Bloomberg page for it was found in an initial check.
-  - **Open decision** (to be confirmed during implementation and recorded in CLAUDE.md): what the fallback values are, how they are stored, and how they are kept up to date.
+- Data source for the 10-year yield: CNBC (cnbc.com quote service) for all three markets. If it cannot be fetched, a stored fallback value is used; fallback values and their as-of dates are kept in the `fallback_rates.json` file and updated manually.
 - This is the portfolio with the best risk-adjusted return and is the point on the efficient frontier a rational risk-neutral-on-a-per-unit-of-risk-basis investor would choose.
 - Solved via the same optimizer family as the other three, with a nonlinear objective (or transformed into a quadratic programming form, a standard technique for tangency portfolio solving).
 
@@ -189,3 +187,4 @@ Users who *do* have a market opinion or view on one or more specific stocks and 
 
 ## 9. Revision history
 - **2026-10-07**: One market per session (India NSE, Australia ASX or USA); stocks that don't appear to belong to the selected market are flagged, never silently included, and never block the user. Max Sharpe's risk-free rate is now the selected market's 10-year government bond yield (user-overridable, with value, source, as-of date and any fallback shown). Changed: Sections 2.1, 2.2, 2.6 (new), 3.4, 6, 9 (new).
+- **2026-10-07** (implementation): open decisions resolved. Out-of-market flagging is based on the listing's exchange, currency and ticker suffix (not the company's home country), and flagged stocks start excluded. The 10-year yield source is CNBC for all three markets instead of Bloomberg (Bloomberg blocked automated requests and has no India 10-year page), with fallback values in `fallback_rates.json`. Changed: Sections 2.6, 3.4, 9.

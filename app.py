@@ -1,7 +1,8 @@
 """Virtual Portfolio Builder: Streamlit UI.
 
-Current scope (V1, steps 1-4): input tickers/names -> resolve & confirm -> fetch raw data ->
-returns, risk, covariance and correlation -> Min Risk, Max Return, Max Dividend, Max Sharpe.
+Current scope (V1, steps 1-4 + one-market-per-session): choose market -> input
+tickers/names -> resolve & confirm -> fetch raw data -> returns, risk, covariance and
+correlation -> Min Risk, Max Return, Max Dividend, Max Sharpe.
 """
 
 from dataclasses import replace
@@ -20,11 +21,13 @@ from data import (
     Resolution,
     TickerData,
     fetch_ticker_data,
+    listing_currency,
+    market_of_exchange,
+    out_of_market_reasons,
     resolve,
 )
 from frontier import efficient_frontier, frontier_check
 from optimizer import (
-    RISK_FREE_RATE,
     Constraints,
     dividend_data_flags,
     equal_weights,
@@ -35,6 +38,7 @@ from optimizer import (
     portfolio_stats,
     prepare_covariance,
 )
+from rates import risk_free_rate as fetch_risk_free_rate
 from stats import compute_stats
 
 MIN_TICKERS = 10  # Section 2.1
@@ -44,9 +48,17 @@ MATCH_EXACT = "✅ Exact ticker"
 MATCH_SINGLE = "✅ Single match"
 MATCH_AUTO = "⚠️ Auto-picked"
 MATCH_PICKED = "✅ Picked by you"
+MATCH_SWITCHED = "⚠️ Switched listing"  # another market's ticker was typed; selected market's listing used
+MATCH_OUTSIDE = "⚠️ Outside market (included by you)"
 
 SKIP_NO_MATCH = "No match"
 SKIP_BY_USER = "Skipped by you"
+
+MARKET_EXAMPLES = {
+    "India (NSE)": ("RELIANCE", "Reliance Industries"),
+    "Australia (ASX)": ("BHP", "Commonwealth Bank"),
+    "USA": ("AAPL", "Microsoft"),
+}
 
 st.set_page_config(page_title="Virtual Portfolio Builder", layout="wide")
 
@@ -82,6 +94,16 @@ def cached_max_sharpe(cov, mu, risk_free_rate, constraints, compare):
 @st.cache_data(show_spinner=False)
 def cached_frontier(cov, mu, constraints, anchors):
     return efficient_frontier(cov, mu, constraints, anchors)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_currency(symbol: str) -> str | None:
+    return listing_currency(symbol)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_risk_free_rate(market: str):
+    return fetch_risk_free_rate(market)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -138,53 +160,102 @@ def render_ticker(td: TickerData, auto_picked: bool = False) -> None:
 st.title("Virtual Portfolio Builder")
 st.caption("V1 · Data, returns, risk, covariance and four optimized portfolios.")
 
+# ---- Market selection: one market per session (PROJECT_SPEC.md Section 2.6) ------------
+ss = st.session_state
+ss.setdefault("market", None)
+ss.setdefault("market_version", 0)  # bumped to reset the market radio to ss.market
+ss.setdefault("input_version", 0)  # bumped to clear the input table
+PROGRESS_KEYS = ("resolutions", "fetched")
+
+
+def input_key() -> str:
+    return f"input_{ss.input_version}"
+
+
+def has_progress() -> bool:
+    edits = ss.get(input_key()) or {}
+    typed = any(edits.get(k) for k in ("added_rows", "edited_rows"))
+    return typed or any(k in ss for k in PROGRESS_KEYS)
+
+
+def clear_progress() -> None:
+    """Wipe the session's progress: entered stocks and all results (user decision)."""
+    for k in list(ss.keys()):
+        if k in PROGRESS_KEYS or k.startswith(("inc_", "pick_")) or (k.startswith("input_") and k != "input_version"):
+            del ss[k]
+    ss.input_version += 1
+
+
+st.subheader("Market")
+market_choice = st.radio(
+    "Choose the market for this session. All stocks must come from this market.",
+    EXCHANGES,
+    index=EXCHANGES.index(ss.market) if ss.market else None,
+    horizontal=True,
+    key=f"market_radio_{ss.market_version}",
+)
+
+if market_choice is None:
+    st.info("Choose a market to start: India (NSE), Australia (ASX) or USA.")
+    st.stop()
+
+if ss.market is None:
+    ss.market = market_choice
+elif market_choice != ss.market:
+    if has_progress():
+        st.warning(
+            f"Switch the market from **{ss.market}** to **{market_choice}**? This clears "
+            "everything in this session: the stocks you entered and all results."
+        )
+        b1, b2, _ = st.columns([1.3, 1.3, 3])
+        if b1.button(f"Switch to {market_choice} and clear", type="primary"):
+            clear_progress()
+            ss.market = market_choice
+            ss.market_version += 1
+            st.rerun()
+        if b2.button(f"Cancel, stay on {ss.market}"):
+            ss.market_version += 1
+            st.rerun()
+        st.stop()
+    ss.market = market_choice
+
+market = ss.market
+
 # ---- Step 1: input --------------------------------------------------------------
 st.subheader("1. Enter stocks")
-default_rows = pd.DataFrame(
-    {
-        "Ticker or company name": ["AAPL", "Reliance", "BHP"],
-        "Exchange": ["USA", "India (NSE)", "Australia (ASX)"],
-    }
-)
+ticker_eg, name_eg = MARKET_EXAMPLES[market]
 
 with st.form("tickers"):
     st.write(
-        f"Enter at least {MIN_TICKERS} stocks, by ticker (e.g. `RELIANCE`) or company "
-        "name (e.g. `Reliance Industries`). Add rows with the **+** at the bottom of the "
+        f"Enter at least {MIN_TICKERS} **{market}** stocks, by ticker (e.g. `{ticker_eg}`) or "
+        f"company name (e.g. `{name_eg}`). Add rows with the **+** at the bottom of the "
         "table; select rows to delete them."
     )
     edited = st.data_editor(
-        default_rows,
+        pd.DataFrame({"Ticker or company name": pd.Series([], dtype="str")}),
         num_rows="dynamic",
         width="stretch",
         hide_index=True,
-        column_config={
-            "Ticker or company name": st.column_config.TextColumn(required=True),
-            "Exchange": st.column_config.SelectboxColumn(
-                options=EXCHANGES, required=True, default="USA"
-            ),
-        },
+        key=input_key(),
+        column_config={"Ticker or company name": st.column_config.TextColumn(required=True)},
     )
     resolve_clicked = st.form_submit_button("Resolve", type="primary")
 
 if resolve_clicked:
-    rows = edited.dropna(subset=["Ticker or company name", "Exchange"])
-    entries = list(
+    queries = list(
         dict.fromkeys(  # drop exact duplicates, keep order
-            (str(q).strip(), ex)
-            for q, ex in zip(rows["Ticker or company name"], rows["Exchange"])
-            if str(q).strip()
+            str(q).strip() for q in edited["Ticker or company name"].dropna() if str(q).strip()
         )
     )
-    if not entries:
+    if not queries:
         st.error("Please enter at least one ticker or company name.")
         st.stop()
 
     with st.spinner("Looking up stocks…"):
-        st.session_state.resolutions = [cached_resolve(q, ex) for q, ex in entries]
-    st.session_state.pop("fetched", None)
+        ss.resolutions = [cached_resolve(q, market) for q in queries]
+    ss.pop("fetched", None)
 
-resolutions: list[Resolution] = st.session_state.get("resolutions", [])
+resolutions: list[Resolution] = ss.get("resolutions", [])
 if not resolutions:
     st.stop()
 
@@ -192,71 +263,92 @@ if not resolutions:
 # ---- Step 2: confirm matches ----------------------------------------------------
 st.subheader("2. Confirm matches")
 st.caption(
-    "Check that each input matched the company you meant. Where there are several "
-    "matches, pick the right one from the dropdown. Untick **Include** to skip a stock. "
-    "To fix a row instead, edit it in the table above and click **Resolve** again."
+    f"Check that each input matched the company you meant on **{market}**. Where there are "
+    "several matches, pick the right one from the dropdown. Untick **Include** to skip a "
+    "stock. Stocks that don't look like they belong to this market are flagged and start "
+    "unticked; tick them to include them anyway. To fix a row instead, edit it in the table "
+    "above and click **Resolve** again."
 )
 
-widths = [0.7, 2, 1.3, 4, 2.4]
+widths = [0.7, 2, 4, 3.4]
 header = st.columns(widths)
-for col, title in zip(header, ["Include", "Your input", "Exchange", "Matched stock", "Status"]):
+for col, title in zip(header, ["Include", "Your input", "Matched stock", "Status"]):
     col.markdown(f"**{title}**")
 
-# included: (symbol, exchange, input, company name, match type)
+# included: (symbol, listing market, input, company name, match type)
 included: list[tuple[str, str, str, str, str]] = []
-skipped: list[tuple[str, str, str]] = []  # (input, exchange, reason)
-for i, r in enumerate(resolutions):
-    c0, c1, c2, c3, c4 = st.columns(widths, vertical_alignment="center")
-    c1.write(f"“{r.query}”")
-    c2.write(r.exchange)
-    key = f"{i}_{r.query}_{r.exchange}"
+skipped: list[tuple[str, str]] = []  # (input, reason)
+with st.spinner("Checking listings…"):
+    for i, r in enumerate(resolutions):
+        c0, c1, c3, c4 = st.columns(widths, vertical_alignment="center")
+        c1.write(f"“{r.query}”")
+        key = f"{i}_{r.query}"
 
-    if r.status == NO_MATCH:
-        c0.checkbox("Include", value=False, disabled=True, key=f"inc_{key}",
-                    label_visibility="collapsed")
-        c3.write(f"_{r.error or r.note or 'No stock found on this exchange.'}_")
-        c4.write("❌ No match: will be skipped")
-        skipped.append((r.query, r.exchange, SKIP_NO_MATCH))
-        continue
+        if r.status == NO_MATCH:
+            c0.checkbox("Include", value=False, disabled=True, key=f"inc_{key}",
+                        label_visibility="collapsed")
+            c3.write(f"_{r.error or r.note or f'No stock found on {market}.'}_")
+            c4.write("❌ No match: will be skipped")
+            skipped.append((r.query, SKIP_NO_MATCH))
+            continue
 
-    include = c0.checkbox("Include", value=True, key=f"inc_{key}",
-                          label_visibility="collapsed")
-    pick = c3.selectbox(
-        f"Match for {r.query}",
-        options=range(len(r.candidates)),
-        format_func=lambda j, r=r: r.candidates[j].label,
-        key=f"pick_{key}",
-        label_visibility="collapsed",
-    )
+        pick = c3.selectbox(
+            f"Match for {r.query}",
+            options=range(len(r.candidates)),
+            format_func=lambda j, r=r: r.candidates[j].label,
+            key=f"pick_{key}",
+            label_visibility="collapsed",
+        )
+        chosen = r.candidates[pick]
+        reasons = out_of_market_reasons(chosen, market, cached_currency(chosen.symbol))
+        # Flagged listings start unticked (user decision); ticking one is the override
+        include = c0.checkbox("Include", value=not reasons, key=f"inc_{key}_{chosen.symbol}",
+                              label_visibility="collapsed")
 
-    if pick != 0:
-        match = MATCH_PICKED
-    elif r.status == EXACT:
-        match = MATCH_EXACT
-    elif r.status == SINGLE:
-        match = MATCH_SINGLE
-    else:
-        match = MATCH_AUTO
+        if reasons:
+            match = MATCH_OUTSIDE
+        elif r.switched:
+            match = MATCH_SWITCHED
+        elif pick != 0:
+            match = MATCH_PICKED
+        elif r.status == EXACT:
+            match = MATCH_EXACT
+        elif r.status == SINGLE:
+            match = MATCH_SINGLE
+        else:
+            match = MATCH_AUTO
 
-    if not include:
-        c4.write("⏭️ Skipped by you")
-        skipped.append((r.query, r.exchange, SKIP_BY_USER))
-        continue
+        if reasons:
+            flag = f"⚠️ Outside {market}: " + "; ".join(reasons)
+            if not include:
+                c4.write(f"{flag}. Not included; tick to include anyway.")
+                skipped.append((r.query, f"Outside {market} ({'; '.join(reasons)})"))
+                continue
+            c4.write(f"{flag}. **Included by you.**")
+        elif not include:
+            c4.write("⏭️ Skipped by you")
+            skipped.append((r.query, SKIP_BY_USER))
+            continue
 
-    chosen = r.candidates[pick]
-    # Several inputs resolving to the same stock: fetch it once, skip the later ones
-    first = next((e for e in included if e[0] == chosen.symbol), None)
-    if first is not None:
-        reason = f"Duplicate of “{first[2]}” ({chosen.symbol})"
-        c4.write(f"⏭️ {reason}: will be skipped")
-        skipped.append((r.query, r.exchange, reason))
-        continue
+        # Several inputs resolving to the same stock: fetch it once, skip the later ones
+        first = next((e for e in included if e[0] == chosen.symbol), None)
+        if first is not None:
+            reason = f"Duplicate of “{first[2]}” ({chosen.symbol})"
+            c4.write(f"⏭️ {reason}: will be skipped")
+            skipped.append((r.query, reason))
+            continue
 
-    if match == MATCH_AUTO:
-        c4.write(f"⚠️ Auto-picked top of {len(r.candidates)} matches (not changed)")
-    else:
-        c4.write(match)
-    included.append((chosen.symbol, r.exchange, r.query, chosen.name, match))
+        if match == MATCH_SWITCHED:
+            c4.write(
+                f"⚠️ You entered {r.entered.symbol} ({r.entered.exchange_display}); using the "
+                f"{market} listing instead (its price and currency)."
+            )
+        elif match == MATCH_AUTO:
+            c4.write(f"⚠️ Auto-picked top of {len(r.candidates)} matches (not changed)")
+        elif match != MATCH_OUTSIDE:
+            c4.write(match)
+        listing_market = market_of_exchange(chosen.exchange_code) or market
+        included.append((chosen.symbol, listing_market, r.query, chosen.name, match))
 
 if included and len(included) < MIN_TICKERS:
     st.warning(
@@ -267,7 +359,7 @@ if included and len(included) < MIN_TICKERS:
 if skipped:
     st.markdown(
         f"**Will skip {len(skipped)}:** "
-        + "; ".join(f"“{q}” ({ex}): {reason}" for q, ex, reason in skipped)
+        + "; ".join(f"“{q}”: {reason}" for q, reason in skipped)
     )
 
 if not included:
@@ -340,7 +432,7 @@ if ok:
 if skipped:
     st.markdown(f"**⏭️ Skipped ({len(skipped)})**")
     st.dataframe(
-        pd.DataFrame(skipped, columns=["Input", "Exchange", "Reason"]),
+        pd.DataFrame(skipped, columns=["Input", "Reason"]),
         width="stretch",
         hide_index=True,
     )
@@ -502,17 +594,35 @@ min_stocks = ctrl_left.number_input(
     help=f"With a {defaults.max_weight:.0%} cap, at least {floor_count} stocks are always "
     "needed to reach 100%, so the minimum can't go lower than that.",
 )
+# Risk-free rate: the market's 10-year government bond yield (Section 3.4), user-overridable
+rf_info = cached_risk_free_rate(market)
 rf_pct = ctrl_right.number_input(
     "Risk-free rate for Max Sharpe (% per year)",
     min_value=0.0,
     max_value=50.0,
-    value=RISK_FREE_RATE * 100,
+    value=round(rf_info.value * 100, 3),
     step=0.25,
-    format="%.2f",
-    help="Used for every Sharpe ratio shown. Default 4%: a placeholder roughly between "
-    "US, Australian and Indian short-term rates; set it to a current rate.",
+    format="%.3f",
+    key=f"rf_{market}_{rf_info.value}",  # resets to the fetched value if it changes
+    help=f"Defaults to the {rf_info.name}. Used for every Sharpe ratio shown. You can "
+    "override it.",
 )
 risk_free_rate = rf_pct / 100
+rf_overridden = abs(rf_pct - round(rf_info.value * 100, 3)) > 1e-9
+
+rf_line = (
+    f"**Risk-free rate:** {rf_info.name} **{rf_info.value:.3%}** · Source: {rf_info.source} "
+    f"· As of: {rf_info.as_of}"
+)
+if rf_info.is_fallback:
+    st.warning(f"⚠️ **Fallback value in use.** {rf_info.note}\n\n{rf_line}")
+else:
+    st.caption(f"{rf_line} (live)")
+if rf_overridden:
+    st.info(
+        f"Risk-free rate overridden by you: **{rf_pct:.3f}%** is used instead of the "
+        f"{rf_info.name} ({rf_info.value:.3%})."
+    )
 constraints = replace(defaults, min_stocks=int(min_stocks))
 
 # Shared by every portfolio: repaired once, used for both optimizing and the displayed figures
@@ -643,6 +753,9 @@ def render_notes(held: pd.Series) -> None:
         st.caption("Stocks with no dividend data are counted as 0% in the portfolio yield.")
     if any(match_of[s] == MATCH_AUTO for s in held.index):
         st.caption(f"{MATCH_AUTO}: check these holdings are the companies you meant.")
+    outside = [s for s in held.index if match_of[s] == MATCH_OUTSIDE]
+    if outside:
+        st.caption(f"⚠️ Holds stocks outside {market} that you chose to include: {', '.join(outside)}.")
     if len(currencies) > 1:
         st.caption(
             "⚠️ Mixed currencies: the expected return combines returns in "
@@ -706,7 +819,7 @@ def frontier_chart(fr, ms_result) -> go.Figure:
         hovertemplate="%{text}<br>Risk %{x:.2f}%<br>Return %{y:.2f}%<extra></extra>",
     ))
     for label, symbol, size in (("Min Risk", "diamond", 14), ("Max Return", "square", 12), ("Max Sharpe", "star", 20)):
-        row = fr.curve[fr.curve.label == label]
+        row = fr.anchors[fr.anchors.label == label]
         if row.empty:
             continue
         fig.add_trace(go.Scatter(
@@ -796,9 +909,11 @@ elif choice in ("Max Return", "Max Dividend"):
 
 else:  # Max Sharpe
     st.caption(
-        f"⚠️ One risk-free rate ({risk_free_rate:.2%}) is applied to every stock, although "
-        + (f"the portfolio mixes {', '.join(currencies)} stocks whose home rates differ. "
-           if len(currencies) > 1 else "home interest rates differ between markets. ")
+        f"Risk-free rate {risk_free_rate:.3%}: "
+        + ("your override. " if rf_overridden else f"the {rf_info.name}"
+           + (" (fallback value). " if rf_info.is_fallback else ". "))
+        + (f"⚠️ The included stocks are priced in {', '.join(currencies)}; this single "
+           f"{market} rate is applied to all of them. " if len(currencies) > 1 else "")
         + "Expected returns are price-only (dividends excluded), which understates Sharpe "
         "ratios for dividend payers."
     )

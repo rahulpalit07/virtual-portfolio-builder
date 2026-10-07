@@ -25,6 +25,9 @@ class Frontier:
     sweep: pd.DataFrame  # swept points only (before adding the portfolios)
     points_requested: int
     points_solved: int
+    # The actual portfolios (Min Risk, Max Return, ...), kept separately: when two coincide
+    # (e.g. Max Sharpe = Max Return), the curve keeps only one label for that point.
+    anchors: pd.DataFrame = None
 
 
 def _risk_return(w: np.ndarray, S: np.ndarray, m: np.ndarray) -> tuple[float, float]:
@@ -75,8 +78,15 @@ def efficient_frontier(
         {**dict(zip(("risk", "expected_return"), _risk_return(w[tickers].to_numpy(), S, m))), "label": name}
         for name, w in anchors.items()
     ]
-    curve = _efficient(pd.concat([sweep, pd.DataFrame(anchor_rows)], ignore_index=True))
-    return Frontier(curve=curve, sweep=sweep, points_requested=len(targets), points_solved=len(sweep))
+    anchor_df = pd.DataFrame(anchor_rows, columns=["risk", "expected_return", "label"])
+    curve = _efficient(pd.concat([sweep, anchor_df], ignore_index=True))
+    return Frontier(
+        curve=curve,
+        sweep=sweep,
+        points_requested=len(targets),
+        points_solved=len(sweep),
+        anchors=anchor_df,
+    )
 
 
 def frontier_check(
@@ -85,7 +95,7 @@ def frontier_check(
     """Is a portfolio on or left of the swept frontier? Compares its risk with the frontier's
     risk at the same expected return (interpolated between swept points and the two ends;
     the portfolio itself is not part of this comparison curve)."""
-    ref = frontier.curve[frontier.curve.label.isin(ends)]
+    ref = frontier.anchors[frontier.anchors.label.isin(ends)]
     pts = _efficient(pd.concat([frontier.sweep, ref], ignore_index=True)).sort_values("expected_return")
     frontier_risk = float(np.interp(expected_return, pts.expected_return, pts.risk))
     gap = risk - frontier_risk
