@@ -14,6 +14,7 @@ equal-weight row, theoretical floor/ceiling, exact optimum, frontier curve) for 
 | `harness.py` | yes | `python tests/regression/harness.py <out.json>`: runs the app on the snapshot and records results. |
 | `compare.py` | yes | `python tests/regression/compare.py baseline.json <out.json>`: every baseline value must exist and be identical (full precision). |
 | `ui_test.py`, `ui_test2.py` | yes | Functional UI checks (examples, matches auto-open, segmented control views, confirmations, market switch, auto-pick warning, data-flag summary). |
+| `ui_test4.py` | yes | Pass 2: card deltas vs equal weight (values and colours), comparison highlighting, donut slices, "why" lines, "Start a new analysis" reset; prints PASS/FAIL and a count. |
 | `ui_test3.py` | yes | Text-box input and the collapsing "1. Your stocks" section (parsing, examples land collapsed, choices survive collapse/reopen, auto-open rules, confirmations); prints PASS/FAIL and a count. |
 | `snapshot.pkl`, `baseline.json`, `pass1.json` | **no** (git-ignored, local only) | Frozen inputs (taken 2026-10-07 22:51 UTC) and the recorded baseline from commit `b74f80f` (before the redesign). |
 

@@ -169,10 +169,95 @@ def flag(text: str) -> str:
     return f":yellow[{text}]"
 
 
+TRANSPARENT = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")  # Plotly on the page background
+
+# Match status as a narrow icon column in the holdings table (meaning in the column's tooltip)
+MATCH_ICON = {
+    MATCH_EXACT: "✅", MATCH_SINGLE: "✅", MATCH_PICKED: "✅",
+    MATCH_AUTO: "⚠️", MATCH_SWITCHED: "🔁", MATCH_OUTSIDE: "🌐",
+}
+FLAG_ICONS = ("⚠️", "🔁", "🌐")
+MATCH_HELP = (
+    "How the stock was matched. ✅ matched (exact ticker, single match or picked by you). "
+    "⚠️ auto-picked from several matches: check it's the company you meant. "
+    "🔁 you typed another market's ticker; this market's listing is used. "
+    "🌐 outside the selected market, included by you."
+)
+
+
 def flag_cells(df: pd.DataFrame, columns: list[str]):
-    """Styler that shades flagged cells (text starting with ⚠️) yellow in `columns`."""
+    """Styler that shades flagged cells (text starting with ⚠️, 🔁 or 🌐) yellow in `columns`."""
     cols = [c for c in columns if c in df.columns]
-    return df.style.map(lambda v: FLAG_CELL if str(v).startswith("⚠️") else "", subset=cols)
+    return df.style.map(lambda v: FLAG_CELL if str(v).startswith(FLAG_ICONS) else "", subset=cols)
+
+
+# ---- Portfolio presentation (one entry per portfolio: V2 / V3 add an entry) --------------------
+# What each portfolio does + the kind of investor who'd look for it (describes investor types;
+# not a recommendation). User copy, 2026-10-08.
+WHY_THIS_PORTFOLIO = {
+    "Min Risk": "The steadiest mix your stocks allow: it combines them so that overall ups and "
+    "downs are as small as possible. *For a cautious investor who cares more about a smooth "
+    "ride than about the highest return.*",
+    "Max Return": "Leans as hard as the rules allow into the stocks with the highest historical "
+    "returns. *For a growth-seeking investor with a long horizon who can live with big swings "
+    "and a concentrated portfolio.*",
+    "Max Dividend": "Leans into the stocks that paid the most in dividends over the last 12 "
+    "months. *For an income-focused investor who wants regular cash payouts more than price "
+    "growth.*",
+    "Max Sharpe": "The best trade-off: the most expected return for each unit of risk taken. "
+    "*For an investor who wants growth but wants every bit of risk to be worth it.*",
+}
+EQUAL_WEIGHT_ROW = "Equal weight (reference)"
+# Metric cards: (stats key, label, kind, delta colouring vs equal weight, help). "inverse" for
+# risk: lower than equal weight is green. Dividend yield: higher is green (my choice; user may change).
+CARD_SPECS = [
+    ("expected_return", "Expected return", "pct", "normal",
+     "Weighted average of each stock's historical annual return. The line below compares it "
+     "with an equal share in all {n} stocks."),
+    ("risk", "Risk", "pct", "inverse",
+     "Annual volatility of the portfolio (standard deviation of returns); lower is steadier. "
+     "The line below compares it with an equal share in all {n} stocks."),
+    ("dividend_yield", "Dividend yield", "pct", "normal",
+     "Weighted dividends paid over the last 12 months. The line below compares it with an "
+     "equal share in all {n} stocks."),
+    ("sharpe", "Sharpe ratio", "num", "normal",
+     "(Expected return − risk-free rate {rf:.2%}) ÷ risk: return per unit of risk. The line "
+     "below compares it with an equal share in all {n} stocks."),
+]
+# Comparison table: best value per column (higher or lower is better), compared at the shown precision
+BEST_IS = {"Expected return": "max", "Risk": "min", "Dividend yield": "max", "Sharpe ratio": "max"}
+SHOWN_DECIMALS = {"Expected return": 2, "Risk": 2, "Dividend yield": 2, "Sharpe ratio": 3}
+BEST_CELL = "background-color: #B9E4BB; font-weight: 700"  # light green, readable on the light blue page
+# Donut slices: no red (red means errors / worse than equal weight), no yellow (flags); adjacent
+# colours contrast in hue and lightness
+DONUT_COLORS = ["#2E7D32", "#1E88E5", "#8E24AA", "#00ACC1", "#7CB342", "#3949AB",
+                "#00897B", "#6D4C41", "#81D4FA", "#546E7A", "#BA68C8", "#A5D6A7"]
+DONUT_ROTATION = 270  # first slice starts at 9 o'clock
+
+
+def best_rows(table: pd.DataFrame, eligible: list[int]) -> dict[str, list[int]]:
+    """Row positions holding the best value in each compared column, among `eligible` rows
+    (never the equal-weight reference). Values are compared as numbers rounded to the shown
+    precision, so everything that displays as the best (ties) is highlighted."""
+    best = {}
+    for col, how in BEST_IS.items():
+        if col not in table.columns:
+            continue
+        values = pd.to_numeric(table.loc[eligible, col], errors="coerce").round(SHOWN_DECIMALS[col]).dropna()
+        if values.empty:
+            continue
+        target = values.max() if how == "max" else values.min()
+        best[col] = list(values.index[values == target])
+    return best
+
+
+def highlight_best(table: pd.DataFrame, best: dict[str, list[int]]):
+    """Styler with the best cells filled light green. Number formats come from column_config,
+    which takes precedence over the Styler, so they are unchanged."""
+    styles = pd.DataFrame("", index=table.index, columns=table.columns)
+    for col, idx in best.items():
+        styles.loc[idx, col] = BEST_CELL
+    return table.style.apply(lambda _t: styles, axis=None)
 
 
 def render_methodology() -> None:
@@ -219,6 +304,13 @@ def finish() -> None:
 
 # ---- Header ----------------------------------------------------------------------------------
 st.title("Virtual Portfolio Builder")
+if st.session_state.pop("scroll_to_top", False):  # after "Start a new analysis"
+    st.html(
+        "<script>window.scrollTo(0, 0); document.querySelectorAll("
+        "'[data-testid=\"stMain\"], [data-testid=\"stAppViewContainer\"], section.main')"
+        ".forEach(e => e.scrollTo(0, 0));</script>",
+        unsafe_allow_javascript=True,
+    )
 st.markdown(
     "Enter the stocks you're interested in and get four optimized portfolios, built with "
     "Nobel Prize-winning portfolio theory: lowest risk, highest return, highest dividend "
@@ -257,6 +349,7 @@ def clear_progress() -> None:
             del ss[k]
     ss.pop("input_seed", None)
     ss.pop("portfolio_view", None)
+    ss.pop("s1_attention_seen", None)
     ss.input_version += 1
 
 
@@ -268,6 +361,19 @@ def load_example(market_name: str) -> None:
     ss.market_version += 1
     ss.input_seed = EXAMPLE_STOCKS[market_name]
     ss.auto_run = True
+
+
+def start_new_analysis() -> None:
+    """Back to the very beginning (user decision 2026-10-08, no confirmation): everything
+    clear_progress() wipes, plus the market choice (nothing pre-selected, spec 2.6), the sidebar
+    settings, any pending confirmation and section 1's collapsed state. Data caches stay warm."""
+    clear_progress()
+    for k in list(ss.keys()):
+        if k in ("min_stocks", "pending_example", "section1_open") or k.startswith(("rf_", "s1_")):
+            del ss[k]
+    ss.market = None
+    ss.market_version += 1  # a fresh market radio with nothing selected
+    ss.scroll_to_top = True
 
 
 def request_example(market_name: str) -> None:
@@ -709,14 +815,18 @@ if flagged or res.high_corr_pairs:
     parts += [f"{a} & {b} move almost identically" for a, b, _x in res.high_corr_pairs]
     st.warning("⚠️ Data worth a look: " + "; ".join(parts) + ". Details under the hood.")
 
-# Comparison of all four (plus equal weight as a reference)
+# Comparison of all four (plus equal weight as a reference). The equal-weight figures computed
+# here also give every metric card its "vs equal weight" delta, so cards and table always agree.
+ew_stats = stats_of(equal_weights(tickers))
+pstats_of = {name: stats_of(r.weights) for name, r in portfolios.items() if r.weights is not None}
+
 st.subheader("Comparison")
 rows = []
 for name, r in portfolios.items():
     if r.weights is None:
         rows.append({"Portfolio": name, "Status": "Not available (see below)"})
         continue
-    s = stats_of(r.weights)
+    s = pstats_of[name]
     rows.append({
         "Portfolio": name,
         "Expected return": s["expected_return"] * 100,
@@ -726,22 +836,24 @@ for name, r in portfolios.items():
         "Stocks held": len(r.held),
         "Status": "❌ failed a check" if r.error else "",
     })
-s = stats_of(equal_weights(tickers))
 rows.append({
-    "Portfolio": "Equal weight (reference)",
-    "Expected return": s["expected_return"] * 100,
-    "Risk": s["risk"] * 100,
-    "Dividend yield": s["dividend_yield"] * 100,
-    "Sharpe ratio": s["sharpe"],
+    "Portfolio": EQUAL_WEIGHT_ROW,
+    "Expected return": ew_stats["expected_return"] * 100,
+    "Risk": ew_stats["risk"] * 100,
+    "Dividend yield": ew_stats["dividend_yield"] * 100,
+    "Sharpe ratio": ew_stats["sharpe"],
     "Stocks held": len(tickers),
     "Status": "",
 })
 comparison = pd.DataFrame(rows)
+# Best per column among the portfolios that were built and passed their checks
+eligible = [i for i, r in enumerate(portfolios.values()) if r.weights is not None and not r.error]
+best = best_rows(comparison, eligible)
 if not comparison["Status"].astype(bool).any():
     comparison = comparison.drop(columns="Status")
 pct2 = st.column_config.NumberColumn(format="%.2f%%")
 st.dataframe(
-    comparison,
+    highlight_best(comparison, best),
     width="stretch",
     hide_index=True,
     height=fit_height(len(comparison)),
@@ -753,6 +865,7 @@ st.dataframe(
     },
 )
 st.caption(
+    "Green = best in each column (highest return, yield and Sharpe ratio; lowest risk). "
     f"Sharpe ratio = (expected return − risk-free rate {risk_free_rate:.2%}) ÷ risk. "
     "Expected returns are historical and price-only (dividends excluded)."
 )
@@ -762,68 +875,115 @@ choice = st.segmented_control(
     label_visibility="collapsed",
 ) or "Min Risk"
 result = portfolios[choice]
+st.markdown(WHY_THIS_PORTFOLIO[choice])
 
 
-def render_holdings(r) -> tuple[pd.Series, list[str]]:
+def donut_chart(held: pd.Series) -> go.Figure:
+    """Held weights as a donut, largest first, clockwise, labels outside the ring. The ring
+    starts at 9 o'clock, so the thin floor-sized slices (last) end on the left side, where
+    their labels stack vertically instead of overlapping."""
+    labels = list(held.index)
+    fig = go.Figure(go.Pie(
+        labels=labels,
+        values=held.to_numpy() * 100,
+        hole=0.55,
+        sort=False,
+        direction="clockwise",
+        rotation=DONUT_ROTATION,
+        marker=dict(colors=[DONUT_COLORS[i % len(DONUT_COLORS)] for i in range(len(labels))],
+                    line=dict(color="white", width=1.5)),
+        texttemplate="%{label} %{value:.2f}%",
+        textposition="outside",
+        automargin=True,  # room for the outside labels, so none is clipped in a narrow column
+        outsidetextfont=dict(size=12),
+        customdata=[by_symbol[s].company_name for s in labels],
+        hovertemplate="<b>%{label}</b><br>%{customdata}<br>Weight %{value:.2f}%<extra></extra>",
+    ))
+    fig.update_layout(
+        showlegend=False,
+        height=380,
+        margin=dict(l=20, r=20, t=40, b=40),
+        annotations=[dict(text=f"<b>{len(labels)}</b><br>stocks held", x=0.5, y=0.5,
+                          showarrow=False, font=dict(size=16))],
+        **TRANSPARENT,
+    )
+    return fig
+
+
+def render_holdings(r, side_by_side: bool) -> tuple[pd.Series, list[str]]:
+    """Donut + compact table: side by side in the full-width views, stacked in the narrow
+    left column of the views with a side panel."""
     held = r.held
     st.markdown(f"**{choice} portfolio ({len(held)} of {len(tickers)} stocks held)**")
-    st.dataframe(
-        flag_cells(pd.DataFrame(
-            [
-                {
-                    "Ticker": s,
-                    "Weight": w * 100,
-                    "Company": by_symbol[s].company_name,
-                    "Exchange": by_symbol[s].exchange,
-                    "Match": match_of[s],
-                }
-                for s, w in held.items()
-            ]
-        ), ["Match"]),
-        width="stretch",
-        hide_index=True,
-        height=fit_height(len(held)),
-        column_config={"Weight": st.column_config.NumberColumn(format="%.2f%%")},
-    )
-    excluded = [s for s in tickers if s not in held.index]
-    if excluded:
-        st.caption("Not held (0%): " + ", ".join(excluded))
+    chart_slot, table_slot = st.columns([1, 1]) if side_by_side else (st.container(), st.container())
+    chart_slot.plotly_chart(donut_chart(held), width="stretch", key=f"donut_{choice}")
+    with table_slot:
+        st.dataframe(
+            flag_cells(pd.DataFrame(
+                [
+                    {
+                        "Ticker": s,
+                        "Company": by_symbol[s].company_name,
+                        "Weight": w * 100,
+                        "Match": MATCH_ICON.get(match_of[s], match_of[s]),
+                    }
+                    for s, w in held.items()
+                ]
+            ), ["Match"]),
+            width="stretch",
+            hide_index=True,
+            height=fit_height(len(held)),
+            column_config={
+                # In the narrow column a long company name would overflow into a horizontal
+                # scrollbar; cap it there (the full name is in the donut's hover)
+                "Company": st.column_config.TextColumn(width=None if side_by_side else 150),
+                "Weight": st.column_config.NumberColumn(format="%.2f%%", width="small"),
+                "Match": st.column_config.TextColumn(width="small", help=MATCH_HELP),
+            },
+        )
+        excluded = [s for s in tickers if s not in held.index]
+        if excluded:
+            st.caption("Not held (0%): " + ", ".join(excluded))
+        render_notes(held)
     return held, excluded
 
 
-def metric_slots(count: int, per_row: int) -> list:
-    """`count` metric slots laid out `per_row` to a row (2 in the narrow side-panel views)."""
-    slots = []
-    while len(slots) < count:
-        slots.extend(st.columns(per_row))
-    return slots[:count]
+def delta_text(diff: float, kind: str) -> tuple[str, bool]:
+    """Difference from equal weight as shown on a card ("+2.31 pts vs equal weight"), and
+    whether it is zero at the shown precision (then it is shown neutral: grey, no arrow)."""
+    number = f"{diff * 100:+.2f}" if kind == "pct" else f"{diff:+.3f}"
+    zero = float(number) == 0
+    if zero:
+        number = number.lstrip("+-")
+    return f"{number}{' pts' if kind == 'pct' else ''} vs equal weight", zero
 
 
-def render_main_stats(pstats: dict[str, float], per_row: int = 4) -> None:
-    m1, m2, m3, m4 = metric_slots(4, per_row)
-    m1.metric("Expected return", f"{pstats['expected_return']:.2%}",
-              help="Weighted average of each stock's historical annual return.")
-    m2.metric("Risk", f"{pstats['risk']:.2%}",
-              help="Annual volatility of the portfolio (standard deviation of returns).")
-    m3.metric("Dividend yield", f"{pstats['dividend_yield']:.2%}",
-              help="Weighted dividends paid over the last 12 months.")
-    m4.metric("Sharpe ratio", f"{pstats['sharpe']:.3f}",
-              help=f"(Expected return − risk-free rate {risk_free_rate:.2%}) ÷ risk.")
+def render_cards(pstats: dict[str, float]) -> None:
+    """Four metric cards, each with its difference from the equal-weight portfolio: green =
+    better than equal weight (lower is better for risk), red = worse (user decision)."""
+    for col, (key, label, kind, colouring, help_text) in zip(st.columns(4), CARD_SPECS):
+        value = f"{pstats[key]:.2%}" if kind == "pct" else f"{pstats[key]:.3f}"
+        text, zero = delta_text(pstats[key] - ew_stats[key], kind)
+        col.metric(
+            label, value, delta=text,
+            delta_color="off" if zero else colouring,
+            delta_arrow="off" if zero else "auto",
+            help=help_text.format(rf=risk_free_rate, n=len(tickers)),
+        )
 
 
 def render_notes(held: pd.Series) -> None:
     if any(np.isnan(v) for v in yields[held.index]):
         st.caption("Stocks with no dividend data are counted as 0% in the portfolio yield.")
-    if any(match_of[s] == MATCH_AUTO for s in held.index):
-        st.caption(f"{MATCH_AUTO}: check these holdings are the companies you meant.")
     outside = [s for s in held.index if match_of[s] == MATCH_OUTSIDE]
     if outside:
         st.caption(flag(f"⚠️ Holds stocks outside {market} that you chose to include: {', '.join(outside)}."))
 
 
-def render_checks(checks, proof: list[tuple[str, str, str]] = ()) -> None:
+def render_checks(checks, proof: list[tuple[str, str, str]] = (), notes: list[str] = ()) -> None:
     """One collapsed line ("All N checks passed"); opens automatically if any check fails.
-    `proof`: (label, value, explanation) figures such as the theoretical floor."""
+    `proof`: (label, value, explanation) figures such as the theoretical floor; `notes`:
+    technical explanations kept out of the main view."""
     applicable = [c for c in checks if c.applicable]
     failed = [c for c in applicable if not c.passed]
     if failed:
@@ -832,6 +992,8 @@ def render_checks(checks, proof: list[tuple[str, str, str]] = ()) -> None:
     else:
         label = f"✅ All {len(applicable)} checks passed"
     with st.expander(label, expanded=bool(failed)):
+        for note in notes:
+            st.caption(note)
         for name, value, explanation in proof:
             st.markdown(f"**{name}: {value}** · _{explanation}_")
         for c in checks:
@@ -898,6 +1060,7 @@ def frontier_chart(fr, ms_result) -> go.Figure:
         height=520,
         margin=dict(l=0, r=0, t=70, b=0),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        **TRANSPARENT,
     )
     return fig
 
@@ -912,19 +1075,12 @@ else:
     if result.error:
         st.error(f"{result.error} The portfolio below should not be relied on.")
 
-    pstats = stats_of(result.weights)
+    render_cards(pstats_of[choice])
 
     if choice == "Min Risk":
         left, right = st.columns([1, 1.2])
         with left:
-            held, excluded = render_holdings(result)
-            render_main_stats(pstats, per_row=2)
-            m5, m6 = metric_slots(2, 2)
-            m5.metric("Equal-weight risk", f"{result.equal_weight_risk:.2%}",
-                      help=f"An equal share in all {len(tickers)} stocks, for comparison.")
-            m6.metric("Risk reduction", f"{result.equal_weight_risk - pstats['risk']:.2%}",
-                      help="Equal-weight risk minus optimized risk.")
-            render_notes(held)
+            held, excluded = render_holdings(result, side_by_side=False)
         with right:
             st.markdown("**Correlation matrix** (held stocks first, by weight)")
             order = list(held.index) + excluded
@@ -937,7 +1093,8 @@ else:
                 color_continuous_scale=CORR_SCALE,
                 aspect="auto",
             )
-            fig.update_layout(height=max(300, 40 * len(order) + 120), margin=dict(l=0, r=0, t=10, b=0))
+            fig.update_layout(height=max(300, 40 * len(order) + 120), margin=dict(l=0, r=0, t=10, b=0),
+                              **TRANSPARENT)
             st.plotly_chart(fig, width="stretch", key="corr_min_risk")
             st.caption(
                 "Min Risk favours stocks with low risk and low correlation to the others "
@@ -955,42 +1112,26 @@ else:
         label = "expected return" if choice == "Max Return" else "dividend yield"
         if choice == "Max Dividend":
             render_dividend_flags()
-        held, _ = render_holdings(result)
-        render_main_stats(pstats)
-        m5, _, _ = st.columns(3)
-        m5.metric(f"Equal-weight {label}", f"{result.equal_weight_value:.2%}",
-                  help=f"An equal share in all {len(tickers)} stocks, for comparison.")
-        st.caption(
-            f"Maximizing {label} is a linear goal, so the optimizer fills the best stocks up to "
-            f"the {constraints.max_weight:.0%} cap; the minimum-stock rule brings in further stocks "
-            f"at the {constraints.min_weight:.1%} floor, and one stock takes whatever is left over. "
-            "This concentration is expected, not a bug."
+        render_holdings(result, side_by_side=True)
+        render_checks(
+            result.checks,
+            [(
+                f"Exact optimum {label}", f"{result.exact_value:.2%}",
+                "worked out directly: hold the top stocks, give each the 2.5% floor, then fill the "
+                "best ones up to the 30% cap. The optimizer must match it.",
+            )],
+            notes=[
+                f"Why so concentrated: maximizing {label} is a linear goal, so the optimizer fills "
+                f"the best stocks up to the {constraints.max_weight:.0%} cap; the minimum-stock rule "
+                f"brings in further stocks at the {constraints.min_weight:.1%} floor, and one stock "
+                "takes whatever is left over. This concentration is expected, not a bug."
+            ],
         )
-        render_notes(held)
-        render_checks(result.checks, [(
-            f"Exact optimum {label}", f"{result.exact_value:.2%}",
-            "worked out directly: hold the top stocks, give each the 2.5% floor, then fill the "
-            "best ones up to the 30% cap. The optimizer must match it.",
-        )])
 
     else:  # Max Sharpe
-        st.caption(
-            f"Risk-free rate {risk_free_rate:.3%}: "
-            + ("your override. " if rf_overridden else f"the {rf_info.name}"
-               + (" (fallback value). " if rf_info.is_fallback else ". "))
-            + (flag(f"⚠️ The included stocks are priced in {', '.join(currencies)}; this single "
-               f"{market} rate is applied to all of them.") + " " if len(currencies) > 1 else "")
-            + "Expected returns are price-only (dividends excluded), which understates Sharpe "
-            "ratios for dividend payers."
-        )
         left, right = st.columns([1, 1.2])
         with left:
-            held, _ = render_holdings(result)
-            render_main_stats(pstats, per_row=2)
-            m5, _ = metric_slots(2, 2)
-            m5.metric("Equal-weight Sharpe", f"{result.equal_weight_sharpe:.3f}",
-                      help=f"An equal share in all {len(tickers)} stocks, for comparison.")
-            render_notes(held)
+            render_holdings(result, side_by_side=False)
         with right:
             st.markdown("**Efficient frontier** (same rules as the portfolios)")
             if frontier is not None:
@@ -1002,6 +1143,15 @@ else:
                     "The curve runs from Min Risk (left end) to Max Return (top end); Max Sharpe "
                     "is the point with the best return per unit of risk."
                 )
+        st.caption(
+            f"Risk-free rate {risk_free_rate:.3%}: "
+            + ("your override. " if rf_overridden else f"the {rf_info.name}"
+               + (" (fallback value). " if rf_info.is_fallback else ". "))
+            + (flag(f"⚠️ The included stocks are priced in {', '.join(currencies)}; this single "
+               f"{market} rate is applied to all of them.") + " " if len(currencies) > 1 else "")
+            + "Expected returns are price-only (dividends excluded), which understates Sharpe "
+            "ratios for dividend payers."
+        )
         checks = list(result.checks)
         if frontier is not None:
             checks.append(frontier_check(frontier, result.risk, result.expected_return))
@@ -1161,9 +1311,12 @@ with st.expander("Data, returns & risk, matrices and sanity checks", expanded=Fa
         n = len(res.corr)
         fig = px.imshow(res.corr, text_auto=".2f", zmin=-1, zmax=1,
                         color_continuous_scale=CORR_SCALE, aspect="auto")
-        fig.update_layout(height=max(300, 45 * n + 120), margin=dict(l=0, r=0, t=10, b=0))
+        fig.update_layout(height=max(300, 45 * n + 120), margin=dict(l=0, r=0, t=10, b=0), **TRANSPARENT)
         st.plotly_chart(fig, width="stretch", key="corr_full")
         st.dataframe(res.corr.style.format("{:.3f}"), width="stretch", height=fit_height(n))
 
+st.button("Start a new analysis", icon=":material/restart_alt:", on_click=start_new_analysis,
+          help="Clears the market, your stocks, all results and the settings, and starts again "
+          "from the top.")
 render_methodology()
 render_footer()
