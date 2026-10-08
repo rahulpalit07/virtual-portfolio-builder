@@ -100,7 +100,11 @@ hd_box.uncheck().run()
 btn(at, "Build").click().run()
 check("built with HD unticked (10 stocks)", has_results(at) and "10 stocks" in (s1(at).label if s1(at) else ""),
       s1(at).label if s1(at) else None)
-check("auto-picked row keeps section 1 open after build (match needs attention)", s1_open(at) is True)
+check("auto-picked row opens section 1 once after build (match needs attention)", s1_open(at) is True)
+at.session_state["section1_open"] = False; at.run()
+check("user can then collapse it; it stays collapsed while the auto-pick is unchanged",
+      s1_open(at) is False and has_results(at))
+at.session_state["section1_open"] = True; at.run()
 # Now resolve the auto-pick by choosing the other candidate, then back: user's choice = 'Picked by you'
 sel = next(s for s in at.selectbox if s.key.startswith("pick_1_"))
 sel.set_value(1).run()

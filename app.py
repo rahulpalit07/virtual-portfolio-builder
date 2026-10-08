@@ -441,7 +441,10 @@ try:
 
 
         attention = needs_attention()
-        if attention:
+        # Open once when a match needing attention first appears (or on a build with one), then
+        # let the user collapse it: such rows often stay as they are (user decision 2026-10-08)
+        if attention and ss.get("s1_attention_seen") != tuple(attention):
+            ss.s1_attention_seen = tuple(attention)
             ensure_section1_open()
         n_found = sum(1 for r in resolutions if r.status != NO_MATCH)
         matches_label = (
@@ -568,6 +571,7 @@ try:
                 results = cached_fetch_all(tuple((s, ex, q, n) for s, ex, q, n, _m in included))
             ss.fetched = (included, skipped, results)
             ss.s1_collapse_next = True  # results start near the top: collapse section 1
+            ss.pop("s1_attention_seen", None)  # ...but reopen once if a match still needs attention
             st.rerun()
 
         fetched = ss.get("fetched")
