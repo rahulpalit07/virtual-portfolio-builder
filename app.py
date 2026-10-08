@@ -350,6 +350,7 @@ def clear_progress() -> None:
     ss.pop("input_seed", None)
     ss.pop("portfolio_view", None)
     ss.pop("s1_attention_seen", None)
+    ss.pop("pending_reset", None)
     ss.input_version += 1
 
 
@@ -364,12 +365,12 @@ def load_example(market_name: str) -> None:
 
 
 def start_new_analysis() -> None:
-    """Back to the very beginning (user decision 2026-10-08, no confirmation): everything
+    """Back to the very beginning (user decision 2026-10-08; confirmed first): everything
     clear_progress() wipes, plus the market choice (nothing pre-selected, spec 2.6), the sidebar
     settings, any pending confirmation and section 1's collapsed state. Data caches stay warm."""
     clear_progress()
     for k in list(ss.keys()):
-        if k in ("min_stocks", "pending_example", "section1_open") or k.startswith(("rf_", "s1_")):
+        if k in ("min_stocks", "pending_example", "pending_reset", "section1_open") or k.startswith(("rf_", "s1_")):
             del ss[k]
     ss.market = None
     ss.market_version += 1  # a fresh market radio with nothing selected
@@ -1315,8 +1316,20 @@ with st.expander("Data, returns & risk, matrices and sanity checks", expanded=Fa
         st.plotly_chart(fig, width="stretch", key="corr_full")
         st.dataframe(res.corr.style.format("{:.3f}"), width="stretch", height=fit_height(n))
 
-st.button("Start a new analysis", icon=":material/restart_alt:", on_click=start_new_analysis,
-          help="Clears the market, your stocks, all results and the settings, and starts again "
-          "from the top.")
+# Starting over clears everything, so it asks first, like the market-switch and example
+# confirmations (user decision 2026-10-08)
+if ss.get("pending_reset"):
+    st.warning(
+        "Start a new analysis? This clears everything in this session: the market, the stocks "
+        "you entered, all results and your settings."
+    )
+    b1, b2, _ = st.columns([1.3, 1.3, 3])
+    b1.button("Start over and clear", type="primary", on_click=start_new_analysis)
+    b2.button("Cancel, keep my results", on_click=lambda: ss.pop("pending_reset", None))
+else:
+    st.button("Start a new analysis", icon=":material/restart_alt:",
+              on_click=lambda: ss.update(pending_reset=True),
+              help="Clears the market, your stocks, all results and the settings, and starts "
+              "again from the top. Asks you to confirm first.")
 render_methodology()
 render_footer()

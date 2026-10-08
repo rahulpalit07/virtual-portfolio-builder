@@ -131,6 +131,17 @@ next(n for n in at.sidebar.number_input if n.label.startswith("Minimum")).set_va
 next(n for n in at.sidebar.number_input if n.label.startswith("Risk-free")).set_value(6.0).run()
 at.get("button_group")[0].set_value("Max Sharpe").run()
 next(b for b in at.button if b.label == "Start a new analysis").click().run()
+check("start over asks for confirmation first, nothing cleared yet",
+      any("Start a new analysis? This clears everything" in w.value for w in at.warning)
+      and at.session_state["market"] == "USA" and "fetched" in at.session_state)
+next(b for b in at.button if b.label.startswith("Cancel, keep")).click().run()
+check("Cancel keeps market, results, settings and view",
+      at.session_state["market"] == "USA" and any(h.value == "2. Your portfolios" for h in at.header)
+      and at.session_state["min_stocks"] == 5 and at.session_state["portfolio_view"] == "Max Sharpe"
+      and not any("Start a new analysis?" in w.value for w in at.warning)
+      and any(b.label == "Start a new analysis" for b in at.button))
+next(b for b in at.button if b.label == "Start a new analysis").click().run()
+next(b for b in at.button if b.label == "Start over and clear").click().run()
 keys = list(at.session_state._state.filtered_state)  # user-visible session-state keys
 leftover = [k for k in keys if k.startswith(("inc_", "pick_", "rf_", "s1_")) or k in (
     "resolutions", "fetched", "listing_currencies", "min_stocks", "portfolio_view", "pending_example",
@@ -155,5 +166,16 @@ next(b for b in at.button if b.label.startswith("Find stocks")).click().run()
 next(b for b in at.button if b.label.startswith("Build")).click().run()
 check("after reset: a typed full run works with no exceptions",
       any(h.value == "2. Your portfolios" for h in at.header) and not exc(at), exc(at))
+
+# a reset left pending is forgotten when the session is cleared another way (market switch)
+at = new()
+next(b for b in at.button if b.label == "USA").click().run()
+next(b for b in at.button if b.label == "Start a new analysis").click().run()
+at.radio[0].set_value("India (NSE)").run()
+next(b for b in at.button if b.label.startswith("Switch to India")).click().run()
+next(b for b in at.button if b.label == "India (NSE)").click().run()
+check("pending start-over is dropped by a market switch (no stale confirmation after the next build)",
+      any(h.value == "2. Your portfolios" for h in at.header)
+      and not any("Start a new analysis?" in w.value for w in at.warning) and not exc(at), exc(at))
 
 print(f"\n{sum(results)}/{len(results)} checks passed")
